@@ -1,9 +1,8 @@
-﻿# Terraform
+# Terraform
 **/.terraform/
 **/*.tfstate
 **/*.tfstate.*
 **/*.tfvars
-**/.terraform.lock.hcl
 
 # Secrets / local configs
 **/*secret*
