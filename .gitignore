@@ -1,0 +1,24 @@
+﻿# Terraform
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+**/.terraform.lock.hcl
+
+# Secrets / local configs
+**/*secret*
+**/*key*
+**/config.yaml
+**/config.json
+**/config.ini
+**/.env
+**/.env.*
+
+# OS/Editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# local memo
+memo/
+
