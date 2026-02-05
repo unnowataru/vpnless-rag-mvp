@@ -26,3 +26,9 @@ memo/
 infra/root/body.json
 infra/root/converse.json
 
+# RAG data (never commit)
+rag_data/
+**/chunks.jsonl
+**/*.jsonl
+**/*.pdf
+logs/
