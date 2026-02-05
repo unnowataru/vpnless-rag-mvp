@@ -12,6 +12,19 @@ PROFILE = "rag"
 
 JP_RUN = re.compile(r"[0-9A-Za-z一-龠々〆ヵヶぁ-ゔァ-ヴー]+", re.UNICODE)
 
+FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+MONTH_RE = re.compile(r"([0-9０-９]+)\s*(?:ヶ|か)?月")
+
+def extract_months(text: str):
+    t = text.translate(FULLWIDTH_DIGITS)
+    out = []
+    for m in MONTH_RE.finditer(t):
+        try:
+            out.append(int(m.group(1)))
+        except Exception:
+            pass
+    return out
+
 def sanitize(s: str) -> str:
     s = re.sub(r"\b[\w\.-]+@[\w\.-]+\.\w+\b", "[EMAIL]", s)
     s = re.sub(r"\b\d{2,4}-\d{2,4}-\d{3,4}\b", "[TEL]", s)
@@ -34,13 +47,16 @@ def call_bedrock(question: str, evidence: str, max_tokens: int) -> str:
     payload = {
         "messages": [
             {"role": "user", "content": [{"text":
-                                "You must answer ONLY using the Evidence blocks.\n"
+                "You must answer ONLY using the Evidence blocks.\n"
+                "Output in Japanese.\n"
                 "Rules:\n"
                 "1) Cite evidence by block number like [1], [2]. Every factual claim MUST have a citation.\n"
-                "2) If evidence is conflicting, say so and list the conflicting blocks.\n"
-                "3) If evidence is insufficient, answer exactly: Evidence is insufficient.\n"
-                "4) Do not invent document names, rule numbers, or durations.\n\n"
+                "2) If the question is ambiguous in scope (e.g., depends on document/employee type), DO NOT say 'Evidence is insufficient.'\n"
+                "   Instead: ask ONE clarification question, and show the candidate answers with citations in one line.\n"
+                "3) Say exactly 'Evidence is insufficient.' ONLY when the Evidence does not contain an explicit answer.\n"
+                "4) Do not quote the evidence verbatim. Summarize.\n\n"
                 f"Question:\n{question}\n\nEvidence:\n{evidence}"
+
             }]}
         ],
         "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0},
