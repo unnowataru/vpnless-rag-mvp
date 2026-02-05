@@ -37,7 +37,13 @@ log "aws cli"
   which aws || true
   aws --version || true
   AWS_PROFILE=rag aws sts get-caller-identity --output json || true
-  AWS_PROFILE=rag aws bedrock list-foundation-models --region ap-northeast-1 --max-results 20 --output json || true
+
+  # list models (keep output small and stable)
+  AWS_PROFILE=rag aws bedrock list-foundation-models \
+    --region ap-northeast-1 \
+    --no-paginate \
+    --query "modelSummaries[].modelId" \
+    --output text || true
 } > "$OUT/02_aws_cli.txt" 2>&1
 
 # 3) NFS/VAST
