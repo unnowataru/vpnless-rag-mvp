@@ -34,7 +34,12 @@ def call_bedrock(question: str, evidence: str, max_tokens: int) -> str:
     payload = {
         "messages": [
             {"role": "user", "content": [{"text":
-                "Answer the question using only the evidence. If evidence is insufficient, say so.\n\n"
+                                "You must answer ONLY using the Evidence blocks.\n"
+                "Rules:\n"
+                "1) Cite evidence by block number like [1], [2]. Every factual claim MUST have a citation.\n"
+                "2) If evidence is conflicting, say so and list the conflicting blocks.\n"
+                "3) If evidence is insufficient, answer exactly: Evidence is insufficient.\n"
+                "4) Do not invent document names, rule numbers, or durations.\n\n"
                 f"Question:\n{question}\n\nEvidence:\n{evidence}"
             }]}
         ],
