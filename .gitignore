@@ -21,3 +21,8 @@ Thumbs.db
 # local memo
 memo/
 
+
+# local-only json (do not commit)
+infra/root/body.json
+infra/root/converse.json
+
