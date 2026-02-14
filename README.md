@@ -11,9 +11,9 @@
 ## 目次
 - [クイックスタート（すぐに試すならこちら）](#quickstart)
 - [設計原則](#design-principles)
-- [スコープ（MVP）](#scope)
+- [MVPスコープ](#scope)
 - [インフラ観点の配置と責務](#infra-roles)
-- [データフロー（インフラ向け）](#data-flow)
+- [データフロー](#data-flow)
 - [動作環境（Linux）](#prerequisites)
 - [AWSアカウント側の準備](#aws-account-prep)
 - [セットアップ手順（詳細）](#initial-setup)
@@ -57,12 +57,19 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 - 統制と説明可能性: 最小権限と監査可能な運用を基本にし、将来の相関ID/TTL制御へ拡張しやすい形で設計する。
 - 可搬性: 計算リソースの配置は固定せず、将来のオンプレ回帰/ハイブリッド継続に対応できる構成を志向する。
 
+この設計で得られるメリット:
+- 機密資料の外部流出リスクを下げられる（原本をクラウドへ置かない）。
+- クラウド常設リソースを最小化し、固定費を抑えやすい。
+- 送信データ範囲が明確なので、監査・説明・承認フローに載せやすい。
+- IAM と実行権限を分離しやすく、運用事故時の影響範囲を限定できる。
+- 将来の要件変更時も、オンプレ寄り/クラウド寄りの配分を調整しやすい。
+
 ## 目的
 - オンプレ側を source-of-truth とし、原本ファイルを AWS に保存しない。
 - Bedrock には「質問 + マスク済み Top-K 根拠チャンク」のみ送信する。
 
 <a id="scope"></a>
-## スコープ（MVP）
+## MVPスコープ
 - 索引作成・検索はローカル Linux で実行。
 - AWS 側に S3 / Knowledge Base / OpenSearch を常設しない。
 - Terraform では予算管理と Bedrock 呼び出し IAM のみを管理。
@@ -82,7 +89,7 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 - AWS側責務: 推論API提供、IAM認可、予算監視。
 
 <a id="data-flow"></a>
-## データフロー（インフラ向け）
+## データフロー
 1. `rag_data/pdfs` の PDF から `chunks.jsonl` を生成する。
 2. `chunks.jsonl` からローカル索引（`vectors.faiss` または `vectors.npy`）を生成する。
 3. 質問時にローカル索引から Top-K 根拠を検索し、必要に応じて Bedrock Rerank で再並び替えする。
@@ -300,6 +307,19 @@ python3 scripts/rag/rag_vector_cli.py \
   "質問文"
 ```
 
+連続対話で実行する場合:
+```bash
+python3 scripts/rag/rag_vector_cli.py \
+  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
+  --interactive
+```
+
+`--interactive` 時の挙動:
+- 起動時に `cost/high` の回答モード選択を質問される（Enter で既定値 `cost`）。
+- `Q>` で質問を連続入力できる。
+- `exit` または `quit` で終了する。
+- `--bedrock-model` を指定した場合は、固定モデルを使うためモード選択質問はスキップされる。
+
 モデル切替例:
 ```bash
 # コスト優先（既定）
@@ -322,6 +342,7 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
 - `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`）
 - `--bedrock-model`（明示指定時は `--answer-profile` より優先）
+- `--interactive`（連続対話モード）
 - `--max-context-chars 12000`
 - `--max-tokens 512`
 - `--region ap-northeast-1`
@@ -331,6 +352,8 @@ python3 scripts/rag/rag_vector_cli.py \
 - `Rerank` は候補の並び替えです。現実装では rerank で選ばれなかった候補も末尾に残します。
 - `=== TOPK EVIDENCE ===` に表示された根拠だけを使って回答させるプロンプトです。
 - 根拠が空の場合のみ `Evidence is insufficient.` を返します。
+- 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問は、制度ごとのルール定義に基づく日付計算を優先し、`=== RULE-BASED ANSWER ===` を返します。
+- このルール計算は `rag_vector_cli.py` の `TEMPORAL_MILESTONE_RULES` に制度を追加することで拡張できます。
 
 <a id="linux-audit"></a>
 ## Linux監査収集
