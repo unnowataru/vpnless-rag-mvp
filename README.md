@@ -50,6 +50,7 @@ terraform apply
 - 通知閾値: `45 / 70 / 85`
 - IAM ユーザー: `rag-bedrock-invoker`
 - Bedrock 呼び出し許可モデル: `google.gemma-3-4b-it`
+- Rerank モデル: `amazon.rerank-v1:0`
 
 ## 7. Bedrock 疎通テスト（WSL）
 ```bash
@@ -83,6 +84,9 @@ python3 scripts/rag/rag_vector_cli.py \
 
 `rag_vector_cli.py` の主要既定値:
 - `--topk 5`
+- `--rerank`（既定: 有効、無効化は `--no-rerank`）
+- `--rerank-model amazon.rerank-v1:0`
+- `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
 - `--max-context-chars 12000`
 - `--max-tokens 512`
 - `--region ap-northeast-1`

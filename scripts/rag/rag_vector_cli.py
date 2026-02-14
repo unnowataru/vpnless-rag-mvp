@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
 DEFAULT_BEDROCK_MODEL = "google.gemma-3-4b-it"
 DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
+DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
 
 EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
 TEL_RE = re.compile(r"\b\d{2,4}-\d{2,4}-\d{3,4}\b")
@@ -100,20 +102,134 @@ def topk_search(
     return scores[sorted_idx][None, :], sorted_idx[None, :]
 
 
+def collect_hits(results_scores: np.ndarray, results_ids: np.ndarray) -> list[dict[str, Any]]:
+    hits: list[dict[str, Any]] = []
+    for score, idx in zip(results_scores[0], results_ids[0]):
+        int_idx = int(idx)
+        if int_idx < 0:
+            continue
+        hits.append({"idx": int_idx, "vector_score": float(score)})
+    return hits
+
+
+def to_rerank_model_arn(model_id_or_arn: str, region: str) -> str:
+    if model_id_or_arn.startswith("arn:"):
+        return model_id_or_arn
+    return f"arn:aws:bedrock:{region}::foundation-model/{model_id_or_arn}"
+
+
+def rerank_hits(
+    question: str,
+    hits: list[dict[str, Any]],
+    metadata: list[dict[str, Any]],
+    region: str,
+    profile: str,
+    rerank_model: str,
+    rerank_topn: int,
+) -> list[dict[str, Any]]:
+    if not hits:
+        return hits
+
+    model_arn = to_rerank_model_arn(rerank_model, region)
+    number_of_results = len(hits) if rerank_topn <= 0 else min(rerank_topn, len(hits))
+
+    sources: list[dict[str, Any]] = []
+    for hit in hits:
+        row = metadata[hit["idx"]]
+        text = sanitize(str(row.get("text", "")).replace("\n", " ")).strip()
+        if not text:
+            text = "(empty)"
+        sources.append(
+            {
+                "type": "INLINE",
+                "inlineDocumentSource": {
+                    "type": "TEXT",
+                    "textDocument": {"text": text[:32000]},
+                },
+            }
+        )
+
+    payload = {
+        "queries": [{"type": "TEXT", "textQuery": {"text": question}}],
+        "rerankingConfiguration": {
+            "type": "BEDROCK_RERANKING_MODEL",
+            "bedrockRerankingConfiguration": {
+                "modelConfiguration": {"modelArn": model_arn},
+                "numberOfResults": number_of_results,
+            },
+        },
+        "sources": sources,
+    }
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
+        json.dump(payload, tmp, ensure_ascii=False)
+        temp_path = tmp.name
+
+    try:
+        cmd = [
+            "aws",
+            "bedrock-agent-runtime",
+            "rerank",
+            "--region",
+            region,
+            "--profile",
+            profile,
+            "--cli-input-json",
+            f"file://{temp_path}",
+            "--no-cli-pager",
+            "--output",
+            "json",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "AWS rerank call failed.")
+
+        body = json.loads(result.stdout) if result.stdout.strip() else {}
+        rerank_results = body.get("results", [])
+        if not rerank_results:
+            return hits
+
+        ordered: list[dict[str, Any]] = []
+        seen_source_indexes: set[int] = set()
+        for item in rerank_results:
+            source_index = item.get("index")
+            if not isinstance(source_index, int):
+                continue
+            if source_index < 0 or source_index >= len(hits):
+                continue
+            merged = dict(hits[source_index])
+            merged["rerank_score"] = float(item.get("relevanceScore", 0.0))
+            ordered.append(merged)
+            seen_source_indexes.add(source_index)
+
+        for source_index, hit in enumerate(hits):
+            if source_index not in seen_source_indexes:
+                ordered.append(hit)
+        return ordered
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
 def build_evidence(
-    results_scores: np.ndarray,
-    results_ids: np.ndarray,
+    hits: list[dict[str, Any]],
     metadata: list[dict[str, Any]],
     max_context_chars: int,
 ) -> str:
     parts: list[str] = []
-    for rank, (score, idx) in enumerate(zip(results_scores[0], results_ids[0]), start=1):
+    for rank, hit in enumerate(hits, start=1):
+        idx = hit["idx"]
         if idx < 0 or idx >= len(metadata):
             continue
         row = metadata[idx]
         snippet = sanitize(str(row.get("text", "")).replace("\n", " "))[:1200]
+        score_str = f"vector={hit['vector_score']:.5f}"
+        if "rerank_score" in hit:
+            score_str += f" rerank={hit['rerank_score']:.5f}"
         parts.append(
-            f"[{rank}] score={float(score):.5f} doc={row.get('doc')} "
+            f"[{rank}] score({score_str}) doc={row.get('doc')} "
             f"page={row.get('page')} chunk={row.get('chunk')}\n{snippet}\n"
         )
     return ("\n".join(parts))[:max_context_chars]
@@ -182,6 +298,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index-dir", required=True, help="Path to vector index directory")
     parser.add_argument("--topk", type=int, default=5)
+    parser.add_argument("--rerank", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--rerank-model", default=DEFAULT_RERANK_MODEL)
+    parser.add_argument(
+        "--rerank-topn",
+        type=int,
+        default=0,
+        help="How many reranked results to request. 0 means all vector hits.",
+    )
     parser.add_argument("--max-context-chars", type=int, default=12000)
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--region", default=DEFAULT_REGION)
@@ -211,7 +335,21 @@ def main() -> None:
     qvec = embed_query(model, question, query_prefix)
 
     scores, ids = topk_search(qvec, args.topk, index_dir, manifest["backend"])
-    evidence = build_evidence(scores, ids, metadata, args.max_context_chars)
+    hits = collect_hits(scores, ids)
+    if args.rerank:
+        try:
+            hits = rerank_hits(
+                question=question,
+                hits=hits,
+                metadata=metadata,
+                region=args.region,
+                profile=args.profile,
+                rerank_model=args.rerank_model,
+                rerank_topn=args.rerank_topn,
+            )
+        except RuntimeError as exc:
+            print(f"[WARN] Rerank failed. Falling back to vector-only ranking: {exc}", file=sys.stderr)
+    evidence = build_evidence(hits, metadata, args.max_context_chars)
 
     print("=== TOPK EVIDENCE ===")
     print(evidence if evidence else "(no hits)")
