@@ -1,7 +1,7 @@
 # vpnless-rag-mvp
 
 このリポジトリは **「オンプレに置いたPDFを根拠に、クラウドAI（AWS Bedrock）で回答するRAG」** を実装するためのものです。  
-運用前提は **Linux（Ubuntu推奨。WSL上のUbuntuでも可）** で、原本データはオンプレに保持したまま、クラウドには最小限の情報だけを送ります。
+推奨環境は **Linux（Ubuntu推奨。WSL上のUbuntuでも可）** で、原本データはオンプレに保持したまま、クラウドには最小限の情報だけを送ります。
 
 動作イメージ:
 - PDF原本はオンプレ側に置く（source-of-truth）
@@ -9,25 +9,25 @@
 - `質問 + Top-K根拠` だけを Bedrock に渡して回答生成
 
 ## 目次
-- [クイックスタート（最短）](#quickstart)
+- [クイックスタート（すぐに試すならこちら）](#quickstart)
 - [設計原則](#design-principles)
 - [スコープ（MVP）](#scope)
 - [インフラ観点の配置と責務](#infra-roles)
 - [データフロー（インフラ向け）](#data-flow)
-- [前提環境（Linux）](#prerequisites)
+- [動作環境（Linux）](#prerequisites)
 - [AWSアカウント側の準備](#aws-account-prep)
-- [初回セットアップ（全体手順）](#initial-setup)
+- [セットアップ手順（詳細）](#initial-setup)
 - [AWS認証（プロファイル / アクセスキー）](#aws-auth)
 - [Terraform（Linux から実行）](#terraform)
 - [Bedrock 疎通テスト（Linux）](#bedrock-connectivity)
 - [ベクトルRAG実行](#vector-rag)
 - [Linux監査収集](#linux-audit)
-- [障害時の切り分け（最短）](#troubleshooting)
+- [トラブル時にまず確認する項目](#troubleshooting)
 - [秘密情報と成果物](#secrets-and-artifacts)
 - [差分・実装計画（Issue）](#issues)
 
 <a id="quickstart"></a>
-## クイックスタート（最短）
+## クイックスタート（すぐに試すならこちら）
 ```bash
 cd /home/<linux-user>/dev/vpnless-rag-mvp
 source /home/<linux-user>/vpnless-rag-venv/bin/activate
@@ -54,7 +54,7 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 
 - データ主権: 原本・メタデータ・権限情報の正本はオンプレ側に置く。
 - 最小開示: クラウドへ送る情報は「質問 + 許可済みTop-K根拠」を原則とし、必要に応じてマスクで制御する。
-- 統制と説明可能性: 最小権限と監査可能な運用を前提にし、将来の相関ID/TTL制御へ拡張可能な形で設計する。
+- 統制と説明可能性: 最小権限と監査可能な運用を基本にし、将来の相関ID/TTL制御へ拡張しやすい形で設計する。
 - 可搬性: 計算リソースの配置は固定せず、将来のオンプレ回帰/ハイブリッド継続に対応できる構成を志向する。
 
 ## 目的
@@ -88,12 +88,12 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 3. 質問時にローカル索引から Top-K 根拠を検索し、必要に応じて Bedrock Rerank で再並び替えする。
 4. Bedrock には `質問 + Top-K 根拠` のみを送信して回答を得る。
 
-送信しないもの:
+クラウドに送らないもの:
 - PDF原本ファイルそのもの
 - ローカル索引ファイルそのもの
 
 <a id="prerequisites"></a>
-## 前提環境（Linux）
+## 動作環境（Linux）
 - Ubuntu 22.04+（WSL2 上の Ubuntu を含む）
 - Python 3.10+
 - AWS CLI v2
@@ -113,7 +113,7 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 - `scripts/audit`: Linux 監査情報収集
 
 <a id="initial-setup"></a>
-## 初回セットアップ（全体手順）
+## セットアップ手順（詳細）
 1. 作業ディレクトリを作成して clone
 ```bash
 mkdir -p /home/<linux-user>/dev
@@ -177,7 +177,7 @@ aws_secret_access_key = yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
 - `aws_access_key_id`: キーの識別子（公開されても直接は使えない）
 - `aws_secret_access_key`: 実質パスワード（漏えい禁止、発行時にしか完全表示されない）
 
-運用ポイント:
+運用の注意点:
 - `tf-admin` と `rag` を共用しない（責務分離）。
 - `rag` は `rag-bedrock-invoker` に限定し、最小権限で運用する。
 - 古いキーは無効化/削除し、常時アクティブキーを増やしすぎない。
@@ -213,8 +213,8 @@ Terraform 管理対象:
 2. AWSコンソールで IAM ユーザー `rag-bedrock-invoker` のアクセスキーを作成
 3. `~/.aws/credentials` の `[rag]` に設定
 
-state 管理:
-- 現在はローカル state 前提（単独運用向け）。
+state 管理（補足）:
+- 現在はローカル state 運用（単独運用向け）。
 - 複数人運用にする場合は、S3 backend + lock（DynamoDB等）へ移行する。
 
 <a id="bedrock-connectivity"></a>
@@ -339,7 +339,7 @@ bash scripts/audit/collect_linux.sh
 ```
 
 <a id="troubleshooting"></a>
-## 障害時の切り分け（最短）
+## トラブル時にまず確認する項目
 1. 認証確認: `aws sts get-caller-identity --profile rag`
 2. モデル疎通: `bash scripts/connectivity/bedrock_converse.sh`
 3. データ確認: `rag_data/pdfs` に PDF があるか、`rag_data/index/chunks.jsonl` があるか
