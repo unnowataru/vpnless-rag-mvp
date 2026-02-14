@@ -31,4 +31,7 @@ rag_data/
 **/chunks.jsonl
 **/*.jsonl
 **/*.pdf
+**/*.faiss
+**/*.npy
+scripts/rag/index/
 logs/

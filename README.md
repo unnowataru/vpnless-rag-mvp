@@ -1,51 +1,101 @@
-﻿# vpnless-rag-mvp (Plan A) / VPNレスRAG MVP (Plan A)
+# vpnless-rag-mvp
 
-## EN: Overview
-- Cloud: AWS Bedrock (Tokyo) + Terraform
-- On-prem: Linux VM (NFS mount) + local vector index (FAISS, etc.)
-- Policy: Keep source-of-truth on-prem. Never persist raw files on AWS.
-  Send only: user question + masked Top-K evidence chunks.
+このリポジトリは **WSL（Linux）専用**で運用する前提です。  
+オンプレを正本とし、AWS Bedrock は生成処理のみに使います。
 
-## JP: 概要
-- Cloud: AWS Bedrock(東京) + Terraform
-- On-prem: Linux VM(NFSマウント) + ローカルベクトル索引(FAISS等)
-- 方針: 正本はオンプレ。AWSへ原本は置かない。
-  送信するのは「質問 + マスク済Top-K根拠チャンク」のみ。
+## 1. 目的
+- オンプレ側を source-of-truth とし、原本ファイルを AWS に保存しない。
+- Bedrock には「質問 + マスク済み Top-K 根拠チャンク」のみ送信する。
 
----
+## 2. スコープ（MVP）
+- 索引作成・検索はローカル（WSL/Linux）で実行。
+- AWS 側に S3 / Knowledge Base / OpenSearch を常設しない。
+- Terraform では予算管理と Bedrock 呼び出し IAM のみを管理。
 
-## EN: Quick start (Windows)
-### AWS profiles
-- `tf-admin`: Terraform apply
-- `rag`: Bedrock invoker (restricted to Gemma model ARN)
+## 3. 前提環境（WSL）
+- WSL2（Ubuntu 推奨）
+- Python 3.10+
+- AWS CLI v2
+- Terraform 1.6+
 
-### Terraform
-- Path: `infra/root`
-- Budget: $90 (alerts: 45/70/85)
-- IAM: `rag-bedrock-invoker` policy restricted to `google.gemma-3-4b-it`
+## 4. リポジトリ構成
+- `infra/root`: Terraform（Budget + IAM）
+- `scripts/connectivity`: Bedrock 疎通テスト
+- `scripts/rag`: ベクトル索引作成 + RAG 実行
+- `scripts/audit`: Linux 監査情報収集
 
-### Smoke test
-- Input: `scripts/smoke/converse.json`
-- Run: `powershell -ExecutionPolicy Bypass -File scripts\smoke\bedrock_converse.ps1`
+## 5. AWS プロファイル
+- `tf-admin`: Terraform 実行用
+- `rag`: Bedrock 推論実行用
 
-## JP: クイックスタート(Windows)
-### AWSプロファイル
-- `tf-admin`: Terraform適用用
-- `rag`: Bedrock呼び出し専用(対象モデルをGemmaに限定)
+例（`~/.aws/config`）:
+```ini
+[profile tf-admin]
+region = ap-northeast-1
 
-### Terraform
-- パス: `infra/root`
-- 予算: $90(通知: 45/70/85)
-- IAM: `rag-bedrock-invoker` は `google.gemma-3-4b-it` のみ許可
+[profile rag]
+region = ap-northeast-1
+```
 
-### スモークテスト
-- 入力: `scripts/smoke/converse.json`
-- 実行: `powershell -ExecutionPolicy Bypass -File scripts\smoke\bedrock_converse.ps1`
+## 6. Terraform（WSL から実行）
+```bash
+cd infra/root
+terraform init
+terraform plan
+terraform apply
+```
 
----
+実装済み内容:
+- 月額予算: `90 USD`
+- 通知閾値: `45 / 70 / 85`
+- IAM ユーザー: `rag-bedrock-invoker`
+- Bedrock 呼び出し許可モデル: `google.gemma-3-4b-it`
 
-## EN/JP: Secrets policy / 秘密情報の扱い
-- Do NOT store secrets in this repo.
-- Store secrets outside the repo (example):
-  - `C:\dev\_secrets\vpnless-rag-mvp\`
-- Repo contains only templates (`*.example`, etc.)
+## 7. Bedrock 疎通テスト（WSL）
+```bash
+bash scripts/connectivity/bedrock_converse.sh
+```
+
+環境変数で上書き可能:
+- `AWS_PROFILE`（既定: `rag`）
+- `AWS_REGION`（既定: `ap-northeast-1`）
+- `BEDROCK_MODEL_ID`（既定: `google.gemma-3-4b-it`）
+
+## 8. ベクトルRAG実行
+1. 依存インストール
+```bash
+python3 -m pip install -r scripts/rag/requirements.txt
+```
+
+2. ベクトル索引作成
+```bash
+python3 scripts/rag/build_vector_index.py \
+  --chunks /path/to/chunks.jsonl \
+  --index-dir /path/to/rag_index
+```
+
+3. RAG 実行
+```bash
+python3 scripts/rag/rag_vector_cli.py \
+  --index-dir /path/to/rag_index \
+  "質問文"
+```
+
+`rag_vector_cli.py` の主要既定値:
+- `--topk 5`
+- `--max-context-chars 12000`
+- `--max-tokens 512`
+- `--region ap-northeast-1`
+- `--profile rag`
+
+## 9. Linux監査収集
+```bash
+bash scripts/audit/collect_linux.sh
+```
+
+## 10. 秘密情報と成果物
+- 秘密情報はリポジトリ外で管理する。
+- `.gitignore` で以下を除外:
+  - `rag_data/`
+  - `*.jsonl`, `*.pdf`, `*.faiss`, `*.npy`
+  - `logs/`
