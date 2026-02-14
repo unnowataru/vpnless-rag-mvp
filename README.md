@@ -206,8 +206,6 @@ terraform plan
 terraform apply
 ```
 
-`infra/root` からの移行手順は `infra/live/prod/README.md` を参照してください。
-
 Terraform 管理対象:
 - 月額予算: `90 USD`
 - 通知閾値: `45 / 70 / 85`
