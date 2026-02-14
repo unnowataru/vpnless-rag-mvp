@@ -34,9 +34,11 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
 DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
 DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
+DEFAULT_SUPER_HIGH_MODEL = os.getenv("RAG_SUPER_HIGH_MODEL_ID", "google.gemma-3-27b-it")
 ANSWER_PROFILE_TO_MODEL = {
     "cost": "google.gemma-3-4b-it",
     "high": "google.gemma-3-27b-it",
+    "super-high": DEFAULT_SUPER_HIGH_MODEL,
 }
 
 EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
@@ -395,9 +397,10 @@ def build_evidence(
     hits: list[dict[str, Any]],
     metadata: list[dict[str, Any]],
     max_context_chars: int,
+    start_rank: int = 1,
 ) -> str:
     parts: list[str] = []
-    for rank, hit in enumerate(hits, start=1):
+    for rank, hit in enumerate(hits, start=start_rank):
         idx = hit["idx"]
         if idx < 0 or idx >= len(metadata):
             continue
@@ -485,18 +488,27 @@ def prompt_answer_profile(default_profile: str) -> str:
     choices = {
         "1": "cost",
         "2": "high",
+        "3": "super-high",
         "cost": "cost",
         "high": "high",
+        "super": "super-high",
+        "super-high": "super-high",
     }
     while True:
-        print("Select answer profile: [1] cost (lower cost), [2] high (higher quality)")
-        raw = input(f"Mode [1/2/cost/high, Enter={default_profile}]> ").strip().lower()
+        print(
+            "Select answer profile: [1] cost (lower cost), "
+            "[2] high (higher quality), [3] super-high (highest quality priority)"
+        )
+        raw = input(f"Mode [1/2/3/cost/high/super-high, Enter={default_profile}]> ").strip().lower()
         if not raw:
             return default_profile
         selected = choices.get(raw)
         if selected is not None:
             return selected
-        print("Invalid choice. Please enter 1, 2, cost, or high.", file=sys.stderr)
+        print(
+            "Invalid choice. Please enter 1, 2, 3, cost, high, super, or super-high.",
+            file=sys.stderr,
+        )
 
 
 def run_single_query(
@@ -509,10 +521,6 @@ def run_single_query(
     answer_profile: str,
 ) -> None:
     rule_answer = build_rule_based_answer(question=question, metadata=metadata, today=date.today())
-    if rule_answer is not None:
-        print("=== RULE-BASED ANSWER ===")
-        print(rule_answer)
-        return
 
     qvec = embed_query(model, question, query_prefix)
 
@@ -531,7 +539,22 @@ def run_single_query(
             )
         except RuntimeError as exc:
             print(f"[WARN] Rerank failed. Falling back to vector-only ranking: {exc}", file=sys.stderr)
-    evidence = build_evidence(hits, metadata, args.max_context_chars)
+    vector_evidence = build_evidence(
+        hits,
+        metadata,
+        args.max_context_chars,
+        start_rank=2 if rule_answer else 1,
+    )
+
+    evidence_parts: list[str] = []
+    if rule_answer:
+        evidence_parts.append(
+            "[1] score(rule=1.00000) doc=local-temporal-helper page=- chunk=-\n"
+            f"{sanitize(rule_answer)}\n"
+        )
+    if vector_evidence:
+        evidence_parts.append(vector_evidence)
+    evidence = ("\n".join(evidence_parts))[: args.max_context_chars]
 
     print("=== TOPK EVIDENCE ===")
     print(evidence if evidence else "(no hits)")
@@ -570,11 +593,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
     parser.add_argument(
         "--answer-profile",
-        choices=["cost", "high"],
+        choices=["cost", "high", "super-high"],
         default="cost",
         help=(
             "Select answer model profile. "
-            "cost=google.gemma-3-4b-it, high=google.gemma-3-27b-it."
+            "cost=google.gemma-3-4b-it, high=google.gemma-3-27b-it, "
+            "super-high=$RAG_SUPER_HIGH_MODEL_ID (default: google.gemma-3-27b-it)."
         ),
     )
     parser.add_argument(

@@ -52,6 +52,7 @@ variable "bedrock_allowed_model_ids" {
   default = [
     "google.gemma-3-4b-it",
     "google.gemma-3-27b-it",
+    "qwen.qwen3-vl-235b-a22b",
     "amazon.titan-embed-text-v2:0"
   ]
 }

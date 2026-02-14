@@ -315,7 +315,7 @@ python3 scripts/rag/rag_vector_cli.py \
 ```
 
 `--interactive` 時の挙動:
-- 起動時に `cost/high` の回答モード選択を質問される（Enter で既定値 `cost`）。
+- 起動時に `cost/high/super-high` の回答モード選択を質問される（Enter で既定値 `cost`）。
 - `Q>` で質問を連続入力できる。
 - `exit` または `quit` で終了する。
 - `--bedrock-model` を指定した場合は、固定モデルを使うためモード選択質問はスキップされる。
@@ -333,14 +333,23 @@ python3 scripts/rag/rag_vector_cli.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
   --answer-profile high \
   "質問文"
+
+# Super High Cost（最優先で高精度。必要に応じてモデルIDを環境変数で上書き）
+RAG_SUPER_HIGH_MODEL_ID=google.gemma-3-27b-it \
+python3 scripts/rag/rag_vector_cli.py \
+  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
+  --answer-profile super-high \
+  "質問文"
 ```
+注記:
+- `RAG_SUPER_HIGH_MODEL_ID` に別モデルを指定する場合は、IAM ポリシーの `bedrock_allowed_model_ids` に同モデルを追加してください（未許可だと AccessDenied になります）。
 
 `rag_vector_cli.py` の主要既定値:
 - `--topk 5`
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
 - `--rerank-model amazon.rerank-v1:0`
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
-- `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`）
+- `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`, `super-high=$RAG_SUPER_HIGH_MODEL_ID`。未設定時は `google.gemma-3-27b-it`）
 - `--bedrock-model`（明示指定時は `--answer-profile` より優先）
 - `--interactive`（連続対話モード）
 - `--max-context-chars 12000`
@@ -352,8 +361,9 @@ python3 scripts/rag/rag_vector_cli.py \
 - `Rerank` は候補の並び替えです。現実装では rerank で選ばれなかった候補も末尾に残します。
 - `=== TOPK EVIDENCE ===` に表示された根拠だけを使って回答させるプロンプトです。
 - 根拠が空の場合のみ `Evidence is insufficient.` を返します。
-- 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問は、制度ごとのルール定義に基づく日付計算を優先し、`=== RULE-BASED ANSWER ===` を返します。
-- このルール計算は `rag_vector_cli.py` の `TEMPORAL_MILESTONE_RULES` に制度を追加することで拡張できます。
+- 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問では、制度ごとのルール定義に基づく日付計算を補助根拠として `=== TOPK EVIDENCE ===` に追加します。
+- 最終回答は常に `=== BEDROCK ANSWER ===` で返します（ローカル計算だけで回答を確定しません）。
+- この補助計算ルールは `rag_vector_cli.py` の `TEMPORAL_MILESTONE_RULES` に制度を追加することで拡張できます。
 
 <a id="linux-audit"></a>
 ## Linux監査収集
