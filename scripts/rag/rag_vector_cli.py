@@ -4,14 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,22 +36,20 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
 DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
 DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
-DEFAULT_SUPER_HIGH_MODEL = os.getenv("RAG_SUPER_HIGH_MODEL_ID", "qwen.qwen3-vl-235b-a22b")
-DEFAULT_SYSTEM_PROMPT = (
+DEFAULT_RUNTIME_CONFIG_FILE = "scripts/rag/config/runtime_config.json"
+JST = timezone(timedelta(hours=9), "JST")
+FALLBACK_SYSTEM_PROMPT = (
     "You must answer ONLY using the Evidence blocks.\n"
     "Output in Japanese.\n"
     "Rules:\n"
     "1) Cite evidence by block number like [1], [2]. Every factual claim MUST have a citation.\n"
     "2) Do not assume missing conditions. If multiple interpretations exist, present branches clearly.\n"
-    "3) If the user's condition is missing for a final conclusion, ask ONE clarification question.\n"
-    "4) Say exactly 'Evidence is insufficient.' only when evidence has no explicit answer.\n"
-    "5) Do not quote evidence verbatim. Summarize.\n"
+    "3) Never stop at only a clarification question. Provide a useful best-effort answer first.\n"
+    "4) If key conditions are missing, show case-by-case answers and then optionally ask ONE clarification question.\n"
+    "5) Say exactly 'Evidence is insufficient.' only when evidence has no explicit answer.\n"
+    "6) Interpret relative dates (e.g., today) using runtime-context evidence if present.\n"
+    "7) Do not quote evidence verbatim. Summarize.\n"
 )
-ANSWER_PROFILE_TO_MODEL = {
-    "cost": "google.gemma-3-4b-it",
-    "high": "google.gemma-3-27b-it",
-    "super-high": DEFAULT_SUPER_HIGH_MODEL,
-}
 
 EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
 TEL_RE = re.compile(r"\b\d{2,4}-\d{2,4}-\d{3,4}\b")
@@ -68,23 +68,19 @@ class TemporalMilestoneRule:
     exclusion_note: str | None = None
 
 
-TEMPORAL_MILESTONE_RULES: tuple[TemporalMilestoneRule, ...] = (
-    TemporalMilestoneRule(
-        name="リフレッシュ休暇",
-        question_keywords=("リフレッシュ休暇", "リフレッシュ"),
-        source_keywords=("リフレッシュ休暇制度", "リフレッシュ休暇"),
-        anchor_month=4,
-        anchor_day=1,
-        exclusion_note="過去5年間の休職通算1年以上などの除外条件は、この計算では未反映です。",
-    ),
-    TemporalMilestoneRule(
-        name="永年勤続",
-        question_keywords=("永年勤続", "勤続表彰", "慰労金"),
-        source_keywords=("永年勤続", "勤続表彰", "慰労金"),
-        anchor_month=4,
-        anchor_day=1,
-    ),
-)
+@dataclass(frozen=True)
+class AnswerProfileConfig:
+    key: str
+    model_id: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    answer_profiles: tuple[AnswerProfileConfig, ...]
+    answer_profile_to_model: dict[str, str]
+    temporal_rules: tuple[TemporalMilestoneRule, ...]
+    default_system_prompt_file: Path | None
 
 
 def sanitize(text: str) -> str:
@@ -221,8 +217,13 @@ def build_temporal_rule_answer(
     return "\n".join(lines)
 
 
-def build_rule_based_answer(question: str, metadata: list[dict[str, Any]], today: date) -> str | None:
-    for rule in TEMPORAL_MILESTONE_RULES:
+def build_rule_based_answer(
+    question: str,
+    metadata: list[dict[str, Any]],
+    today: date,
+    temporal_rules: tuple[TemporalMilestoneRule, ...],
+) -> str | None:
+    for rule in temporal_rules:
         answer = build_temporal_rule_answer(
             question=question,
             metadata=metadata,
@@ -234,10 +235,110 @@ def build_rule_based_answer(question: str, metadata: list[dict[str, Any]], today
     return None
 
 
-def load_system_prompt(path: str | None) -> str:
-    if path is None:
-        return DEFAULT_SYSTEM_PROMPT
-    prompt_path = Path(path).expanduser()
+def make_request_id(provided: str | None) -> str:
+    if provided:
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", provided).strip("._-")
+        if safe:
+            return safe[:128]
+    return uuid.uuid4().hex
+
+
+def current_times() -> tuple[datetime, datetime]:
+    now_utc = datetime.now(timezone.utc)
+    now_jst = now_utc.astimezone(JST)
+    return now_utc, now_jst
+
+
+def system_prompt_sha256(system_prompt: str) -> str:
+    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
+
+def load_runtime_config(path: str) -> RuntimeConfig:
+    config_path = Path(path).expanduser().resolve()
+    if not config_path.exists():
+        raise SystemExit(f"--runtime-config-file not found: {config_path}")
+
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+
+    profiles_raw = raw.get("answer_profiles")
+    if not isinstance(profiles_raw, list) or not profiles_raw:
+        raise SystemExit(f"Invalid answer_profiles in runtime config: {config_path}")
+
+    answer_profiles: list[AnswerProfileConfig] = []
+    answer_profile_to_model: dict[str, str] = {}
+    for row in profiles_raw:
+        if not isinstance(row, dict):
+            raise SystemExit(f"Invalid answer_profiles entry in runtime config: {config_path}")
+        key = str(row.get("key", "")).strip()
+        model_id = str(row.get("model_id", "")).strip()
+        if not key or not model_id:
+            raise SystemExit(f"answer_profiles entry requires key/model_id: {config_path}")
+
+        env_override = str(row.get("env_override", "")).strip()
+        if env_override:
+            override_value = os.getenv(env_override, "").strip()
+            if override_value:
+                model_id = override_value
+
+        description = str(row.get("description", "")).strip()
+        if key in answer_profile_to_model:
+            raise SystemExit(f"Duplicate answer profile key '{key}' in: {config_path}")
+        answer_profiles.append(AnswerProfileConfig(key=key, model_id=model_id, description=description))
+        answer_profile_to_model[key] = model_id
+
+    temporal_rules_raw = raw.get("temporal_rules", [])
+    if not isinstance(temporal_rules_raw, list):
+        raise SystemExit(f"Invalid temporal_rules in runtime config: {config_path}")
+
+    temporal_rules: list[TemporalMilestoneRule] = []
+    for row in temporal_rules_raw:
+        if not isinstance(row, dict):
+            raise SystemExit(f"Invalid temporal_rules entry in runtime config: {config_path}")
+        name = str(row.get("name", "")).strip()
+        question_keywords = tuple(
+            str(item).strip() for item in row.get("question_keywords", []) if str(item).strip()
+        )
+        source_keywords = tuple(
+            str(item).strip() for item in row.get("source_keywords", []) if str(item).strip()
+        )
+        if not name or not question_keywords or not source_keywords:
+            raise SystemExit(f"temporal_rules entry requires name/question_keywords/source_keywords: {config_path}")
+        temporal_rules.append(
+            TemporalMilestoneRule(
+                name=name,
+                question_keywords=question_keywords,
+                source_keywords=source_keywords,
+                anchor_month=int(row.get("anchor_month", 4)),
+                anchor_day=int(row.get("anchor_day", 1)),
+                exclusion_note=str(row.get("exclusion_note", "")).strip() or None,
+            )
+        )
+
+    default_prompt_raw = str(raw.get("default_system_prompt_file", "")).strip()
+    default_prompt_path: Path | None = None
+    if default_prompt_raw:
+        candidate = Path(default_prompt_raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (config_path.parent / candidate).resolve()
+        default_prompt_path = candidate
+
+    return RuntimeConfig(
+        answer_profiles=tuple(answer_profiles),
+        answer_profile_to_model=answer_profile_to_model,
+        temporal_rules=tuple(temporal_rules),
+        default_system_prompt_file=default_prompt_path,
+    )
+
+
+def load_system_prompt(path: str | None, default_path: Path | None) -> str:
+    prompt_path: Path | None = None
+    if path is not None:
+        prompt_path = Path(path).expanduser().resolve()
+    elif default_path is not None:
+        prompt_path = default_path
+    else:
+        return FALLBACK_SYSTEM_PROMPT
+
     if not prompt_path.exists():
         raise SystemExit(f"--system-prompt-file not found: {prompt_path}")
     text = prompt_path.read_text(encoding="utf-8").strip()
@@ -420,8 +521,9 @@ def build_evidence(
     metadata: list[dict[str, Any]],
     max_context_chars: int,
     start_rank: int = 1,
-) -> str:
+) -> tuple[str, list[dict[str, Any]]]:
     parts: list[str] = []
+    entries: list[dict[str, Any]] = []
     for rank, hit in enumerate(hits, start=start_rank):
         idx = hit["idx"]
         if idx < 0 or idx >= len(metadata):
@@ -435,7 +537,52 @@ def build_evidence(
             f"[{rank}] score({score_str}) doc={row.get('doc')} "
             f"page={row.get('page')} chunk={row.get('chunk')}\n{snippet}\n"
         )
-    return ("\n".join(parts))[:max_context_chars]
+        entries.append(
+            {
+                "rank": rank,
+                "source_type": "vector",
+                "doc": row.get("doc"),
+                "page": row.get("page"),
+                "chunk": row.get("chunk"),
+                "vector_score": hit.get("vector_score"),
+                "rerank_score": hit.get("rerank_score"),
+            }
+        )
+    return ("\n".join(parts))[:max_context_chars], entries
+
+
+def build_runtime_evidence_block(
+    rank: int, request_id: str, now_utc: datetime, now_jst: datetime
+) -> tuple[str, dict[str, Any]]:
+    block = (
+        f"[{rank}] score(runtime=1.00000) doc=runtime-context page=- chunk=-\n"
+        f"request_id={request_id} "
+        f"executed_at_utc={now_utc.isoformat()} "
+        f"executed_at_jst={now_jst.isoformat()} "
+        f"today_jst={now_jst.date().isoformat()} "
+        "relative_date_reference=today_jst\n"
+    )
+    entry = {
+        "rank": rank,
+        "source_type": "runtime_context",
+        "request_id": request_id,
+        "executed_at_utc": now_utc.isoformat(),
+        "executed_at_jst": now_jst.isoformat(),
+        "today_jst": now_jst.date().isoformat(),
+    }
+    return block, entry
+
+
+def write_audit_log(log_dir: str, request_id: str, payload: dict[str, Any]) -> Path:
+    root = Path(log_dir).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = payload.get("executed_at_utc", "").replace(":", "").replace("-", "")
+    safe_stamp = re.sub(r"[^0-9TZ\.]", "", str(stamp)) or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = root / f"{safe_stamp}_{request_id}.json"
+    if out.exists():
+        out = root / f"{safe_stamp}_{request_id}_{uuid.uuid4().hex[:8]}.json"
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out
 
 
 def call_bedrock(
@@ -488,40 +635,49 @@ def call_bedrock(
             pass
 
 
-def resolve_bedrock_model(answer_profile: str, bedrock_model: str | None) -> str:
+def resolve_bedrock_model(
+    answer_profile: str,
+    bedrock_model: str | None,
+    answer_profile_to_model: dict[str, str],
+) -> str:
     if bedrock_model:
         return bedrock_model
-    try:
-        return ANSWER_PROFILE_TO_MODEL[answer_profile]
-    except KeyError as exc:
-        raise SystemExit(f"Unsupported --answer-profile: {answer_profile}") from exc
+    model_id = answer_profile_to_model.get(answer_profile)
+    if model_id is None:
+        raise SystemExit(f"Unsupported --answer-profile: {answer_profile}")
+    return model_id
 
 
-def prompt_answer_profile(default_profile: str) -> str:
-    choices = {
-        "1": "cost",
-        "2": "high",
-        "3": "super-high",
-        "cost": "cost",
-        "high": "high",
-        "super": "super-high",
-        "super-high": "super-high",
-    }
+def select_default_answer_profile(answer_profiles: tuple[AnswerProfileConfig, ...]) -> str:
+    if not answer_profiles:
+        raise SystemExit("No answer profiles configured in runtime config.")
+    for profile in answer_profiles:
+        if profile.key == "cost":
+            return profile.key
+    return answer_profiles[0].key
+
+
+def prompt_answer_profile(
+    default_profile: str,
+    answer_profiles: tuple[AnswerProfileConfig, ...],
+) -> str:
+    index_to_key = {str(i): profile.key for i, profile in enumerate(answer_profiles, start=1)}
+    text_to_key = {profile.key.lower(): profile.key for profile in answer_profiles}
+
     while True:
-        print(
-            "Select answer profile: [1] cost (lower cost), "
-            "[2] high (higher quality), [3] super-high (highest quality priority)"
-        )
-        raw = input(f"Mode [1/2/3/cost/high/super-high, Enter={default_profile}]> ").strip().lower()
+        labels: list[str] = []
+        for i, profile in enumerate(answer_profiles, start=1):
+            desc = f" ({profile.description})" if profile.description else ""
+            labels.append(f"[{i}] {profile.key}{desc}")
+        print("Select answer profile: " + ", ".join(labels))
+        options = "/".join([str(i) for i in range(1, len(answer_profiles) + 1)] + [p.key for p in answer_profiles])
+        raw = input(f"Mode [{options}, Enter={default_profile}]> ").strip()
         if not raw:
             return default_profile
-        selected = choices.get(raw)
+        selected = index_to_key.get(raw) or text_to_key.get(raw.lower())
         if selected is not None:
             return selected
-        print(
-            "Invalid choice. Please enter 1, 2, 3, cost, high, super, or super-high.",
-            file=sys.stderr,
-        )
+        print(f"Invalid choice. Please enter one of: {options}.", file=sys.stderr)
 
 
 def run_single_query(
@@ -533,8 +689,17 @@ def run_single_query(
     query_prefix: str,
     answer_profile: str,
     system_prompt: str,
+    temporal_rules: tuple[TemporalMilestoneRule, ...],
+    answer_profile_to_model: dict[str, str],
 ) -> None:
-    rule_answer = build_rule_based_answer(question=question, metadata=metadata, today=date.today())
+    request_id = make_request_id(args.request_id)
+    now_utc, now_jst = current_times()
+    rule_answer = build_rule_based_answer(
+        question=question,
+        metadata=metadata,
+        today=now_jst.date(),
+        temporal_rules=temporal_rules,
+    )
 
     qvec = embed_query(model, question, query_prefix)
 
@@ -553,46 +718,156 @@ def run_single_query(
             )
         except RuntimeError as exc:
             print(f"[WARN] Rerank failed. Falling back to vector-only ranking: {exc}", file=sys.stderr)
-    vector_evidence = build_evidence(
+    vector_start_rank = 3 if rule_answer else 2
+    vector_evidence, vector_entries = build_evidence(
         hits,
         metadata,
         args.max_context_chars,
-        start_rank=2 if rule_answer else 1,
+        start_rank=vector_start_rank,
     )
 
-    evidence_parts: list[str] = []
+    runtime_block, runtime_entry = build_runtime_evidence_block(
+        rank=1,
+        request_id=request_id,
+        now_utc=now_utc,
+        now_jst=now_jst,
+    )
+    evidence_parts: list[str] = [runtime_block]
+    evidence_entries: list[dict[str, Any]] = [runtime_entry]
     if rule_answer:
+        rule_rank = 2
         evidence_parts.append(
-            "[1] score(rule=1.00000) doc=local-temporal-helper page=- chunk=-\n"
+            f"[{rule_rank}] score(rule=1.00000) doc=local-temporal-helper page=- chunk=-\n"
             f"{sanitize(rule_answer)}\n"
+        )
+        evidence_entries.append(
+            {
+                "rank": rule_rank,
+                "source_type": "local_rule",
+                "doc": "local-temporal-helper",
+                "page": -1,
+                "chunk": -1,
+            }
         )
     if vector_evidence:
         evidence_parts.append(vector_evidence)
+        evidence_entries.extend(vector_entries)
     evidence = ("\n".join(evidence_parts))[: args.max_context_chars]
 
     print("=== TOPK EVIDENCE ===")
     print(evidence if evidence else "(no hits)")
     print("=== BEDROCK ANSWER ===")
-    if not evidence:
-        print("Evidence is insufficient.")
+    has_substantive_evidence = bool(vector_entries) or bool(rule_answer)
+    if not evidence or not has_substantive_evidence:
+        answer = "Evidence is insufficient."
+        print(answer)
+        if args.audit_log_dir:
+            payload = {
+                "request_id": request_id,
+                "executed_at_utc": now_utc.isoformat(),
+                "executed_at_jst": now_jst.isoformat(),
+                "region": args.region,
+                "profile": args.profile,
+                "model_id": resolve_bedrock_model(
+                    answer_profile,
+                    args.bedrock_model,
+                    answer_profile_to_model,
+                ),
+                "question": sanitize(question),
+                "answer": answer,
+                "status": "insufficient",
+                "error": None,
+                "system_prompt_file": args.system_prompt_file,
+                "system_prompt_sha256": system_prompt_sha256(system_prompt),
+                "evidence_entries": evidence_entries,
+                "index_dir": str(args.index_dir),
+                "topk": args.topk,
+                "rerank": args.rerank,
+                "rerank_model": args.rerank_model,
+                "rerank_topn": args.rerank_topn,
+            }
+            audit_path = write_audit_log(args.audit_log_dir, request_id, payload)
+            print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
         return
 
-    bedrock_model = resolve_bedrock_model(answer_profile, args.bedrock_model)
-    answer = call_bedrock(
-        question=question,
-        evidence=evidence,
-        system_prompt=system_prompt,
-        max_tokens=args.max_tokens,
-        region=args.region,
-        profile=args.profile,
-        model_id=bedrock_model,
+    bedrock_model = resolve_bedrock_model(
+        answer_profile,
+        args.bedrock_model,
+        answer_profile_to_model,
     )
+    answer = ""
+    error_message: str | None = None
+    try:
+        answer = call_bedrock(
+            question=question,
+            evidence=evidence,
+            system_prompt=system_prompt,
+            max_tokens=args.max_tokens,
+            region=args.region,
+            profile=args.profile,
+            model_id=bedrock_model,
+        )
+    except RuntimeError as exc:
+        error_message = str(exc)
+        if args.audit_log_dir:
+            payload = {
+                "request_id": request_id,
+                "executed_at_utc": now_utc.isoformat(),
+                "executed_at_jst": now_jst.isoformat(),
+                "region": args.region,
+                "profile": args.profile,
+                "model_id": bedrock_model,
+                "question": sanitize(question),
+                "answer": None,
+                "status": "failed",
+                "error": error_message,
+                "system_prompt_file": args.system_prompt_file,
+                "system_prompt_sha256": system_prompt_sha256(system_prompt),
+                "evidence_entries": evidence_entries,
+                "index_dir": str(args.index_dir),
+                "topk": args.topk,
+                "rerank": args.rerank,
+                "rerank_model": args.rerank_model,
+                "rerank_topn": args.rerank_topn,
+            }
+            audit_path = write_audit_log(args.audit_log_dir, request_id, payload)
+            print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
+        raise
+
     print(answer)
+    if args.audit_log_dir:
+        payload = {
+            "request_id": request_id,
+            "executed_at_utc": now_utc.isoformat(),
+            "executed_at_jst": now_jst.isoformat(),
+            "region": args.region,
+            "profile": args.profile,
+            "model_id": bedrock_model,
+            "question": sanitize(question),
+            "answer": answer,
+            "status": "success",
+            "error": error_message,
+            "system_prompt_file": args.system_prompt_file,
+            "system_prompt_sha256": system_prompt_sha256(system_prompt),
+            "evidence_entries": evidence_entries,
+            "index_dir": str(args.index_dir),
+            "topk": args.topk,
+            "rerank": args.rerank,
+            "rerank_model": args.rerank_model,
+            "rerank_topn": args.rerank_topn,
+        }
+        audit_path = write_audit_log(args.audit_log_dir, request_id, payload)
+        print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index-dir", required=True, help="Path to vector index directory")
+    parser.add_argument(
+        "--runtime-config-file",
+        default=DEFAULT_RUNTIME_CONFIG_FILE,
+        help="Path to runtime config JSON (profiles + temporal rules + default prompt path).",
+    )
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--rerank", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--rerank-model", default=DEFAULT_RERANK_MODEL)
@@ -608,13 +883,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
     parser.add_argument(
         "--answer-profile",
-        choices=["cost", "high", "super-high"],
-        default="cost",
-        help=(
-            "Select answer model profile. "
-            "cost=google.gemma-3-4b-it, high=google.gemma-3-27b-it, "
-            "super-high=$RAG_SUPER_HIGH_MODEL_ID (default: qwen.qwen3-vl-235b-a22b)."
-        ),
+        default=None,
+        help="Answer profile key defined in runtime config.",
     )
     parser.add_argument(
         "--bedrock-model",
@@ -625,6 +895,16 @@ def parse_args() -> argparse.Namespace:
         "--system-prompt-file",
         default=None,
         help="Path to a custom system prompt text file.",
+    )
+    parser.add_argument(
+        "--audit-log-dir",
+        default=None,
+        help="Directory to persist per-query audit logs as JSON.",
+    )
+    parser.add_argument(
+        "--request-id",
+        default=None,
+        help="Optional request ID for audit tracing. If omitted, auto-generated.",
     )
     parser.add_argument(
         "--interactive",
@@ -647,17 +927,27 @@ def main() -> None:
     metadata = load_metadata(index_dir)
     model_name = manifest["embedding_model"]
     query_prefix = manifest.get("query_prefix", "")
+    runtime_config = load_runtime_config(args.runtime_config_file)
 
     model = SentenceTransformer(model_name)
-    system_prompt = load_system_prompt(args.system_prompt_file)
+    system_prompt = load_system_prompt(args.system_prompt_file, runtime_config.default_system_prompt_file)
 
-    selected_profile = args.answer_profile
+    configured_default = select_default_answer_profile(runtime_config.answer_profiles)
+    selected_profile = args.answer_profile or configured_default
+    if selected_profile not in runtime_config.answer_profile_to_model:
+        allowed = ", ".join(runtime_config.answer_profile_to_model.keys())
+        raise SystemExit(f"Unsupported --answer-profile: {selected_profile}. Allowed: {allowed}")
+
     if args.interactive:
         if args.bedrock_model:
             print(f"[INFO] --bedrock-model is set. answer profile prompt is skipped: {args.bedrock_model}")
         else:
-            selected_profile = prompt_answer_profile(args.answer_profile)
-            selected_model = resolve_bedrock_model(selected_profile, None)
+            selected_profile = prompt_answer_profile(configured_default, runtime_config.answer_profiles)
+            selected_model = resolve_bedrock_model(
+                selected_profile,
+                None,
+                runtime_config.answer_profile_to_model,
+            )
             print(f"[INFO] Using answer profile '{selected_profile}' ({selected_model})")
         if args.system_prompt_file:
             print(f"[INFO] Using custom system prompt: {args.system_prompt_file}")
@@ -681,6 +971,8 @@ def main() -> None:
                 query_prefix=query_prefix,
                 answer_profile=selected_profile,
                 system_prompt=system_prompt,
+                temporal_rules=runtime_config.temporal_rules,
+                answer_profile_to_model=runtime_config.answer_profile_to_model,
             )
             print()
         return
@@ -697,6 +989,8 @@ def main() -> None:
         query_prefix=query_prefix,
         answer_profile=selected_profile,
         system_prompt=system_prompt,
+        temporal_rules=runtime_config.temporal_rules,
+        answer_profile_to_model=runtime_config.answer_profile_to_model,
     )
 
 

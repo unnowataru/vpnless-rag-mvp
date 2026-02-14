@@ -352,14 +352,26 @@ python3 scripts/rag/rag_vector_cli.py \
   "質問文"
 ```
 
+監査ログ保存例:
+```bash
+python3 scripts/rag/rag_vector_cli.py \
+  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
+  --audit-log-dir /home/user/dev/vpnless-rag-mvp/logs/audit \
+  --request-id test-001 \
+  "質問文"
+```
+
 `rag_vector_cli.py` の主要既定値:
 - `--topk 5`
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
 - `--rerank-model amazon.rerank-v1:0`
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
-- `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`, `super-high=$RAG_SUPER_HIGH_MODEL_ID`。未設定時は `qwen.qwen3-vl-235b-a22b`）
+- `--runtime-config-file scripts/rag/config/runtime_config.json`（回答プロファイル/時間計算ルール/既定プロンプトを定義）
+- `--answer-profile <key>`（未指定時は `runtime_config.json` の既定プロファイル）
 - `--bedrock-model`（明示指定時は `--answer-profile` より優先）
 - `--system-prompt-file`（システムプロンプトを外部ファイルで上書き）
+- `--audit-log-dir`（1クエリ1JSONで監査ログ保存）
+- `--request-id`（監査トレース用の任意ID）
 - `--interactive`（連続対話モード）
 - `--max-context-chars 12000`
 - `--max-tokens 512`
@@ -368,12 +380,12 @@ python3 scripts/rag/rag_vector_cli.py \
 
 挙動メモ:
 - `Rerank` は候補の並び替えです。現実装では rerank で選ばれなかった候補も末尾に残します。
-- `=== TOPK EVIDENCE ===` に表示された根拠だけを使って回答させるプロンプトです。
+- `=== TOPK EVIDENCE ===` には実行時刻（UTC/JST・request_id）のランタイム根拠も自動付与されます。
 - 根拠が空の場合のみ `Evidence is insufficient.` を返します。
-- 既定のシステムプロンプトは「不足条件を推定しない」「必要なら場合分け」「最終確定に条件不足なら確認質問1つ」を指示します。
+- 既定のシステムプロンプトは「不足条件を推定しない」「必要なら場合分け」「回答を先に出し、必要時のみ最後に確認質問1つ」を指示します。
 - 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問では、制度ごとのルール定義に基づく日付計算を補助根拠として `=== TOPK EVIDENCE ===` に追加します。
 - 最終回答は常に `=== BEDROCK ANSWER ===` で返します（ローカル計算だけで回答を確定しません）。
-- この補助計算ルールは `rag_vector_cli.py` の `TEMPORAL_MILESTONE_RULES` に制度を追加することで拡張できます。
+- この補助計算ルールは `scripts/rag/config/runtime_config.json` の `temporal_rules` を更新して拡張できます（コード修正不要）。
 
 <a id="linux-audit"></a>
 ## Linux監査収集

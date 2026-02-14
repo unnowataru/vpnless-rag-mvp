@@ -1,0 +1,52 @@
+{
+  "answer_profiles": [
+    {
+      "key": "cost",
+      "model_id": "google.gemma-3-4b-it",
+      "description": "lower cost"
+    },
+    {
+      "key": "high",
+      "model_id": "google.gemma-3-27b-it",
+      "description": "higher quality"
+    },
+    {
+      "key": "super-high",
+      "model_id": "qwen.qwen3-vl-235b-a22b",
+      "description": "highest quality priority",
+      "env_override": "RAG_SUPER_HIGH_MODEL_ID"
+    }
+  ],
+  "temporal_rules": [
+    {
+      "name": "リフレッシュ休暇",
+      "question_keywords": [
+        "リフレッシュ休暇",
+        "リフレッシュ"
+      ],
+      "source_keywords": [
+        "リフレッシュ休暇制度",
+        "リフレッシュ休暇"
+      ],
+      "anchor_month": 4,
+      "anchor_day": 1,
+      "exclusion_note": "過去5年間の休職通算1年以上などの除外条件は、この計算では未反映です。"
+    },
+    {
+      "name": "永年勤続",
+      "question_keywords": [
+        "永年勤続",
+        "勤続表彰",
+        "慰労金"
+      ],
+      "source_keywords": [
+        "永年勤続",
+        "勤続表彰",
+        "慰労金"
+      ],
+      "anchor_month": 4,
+      "anchor_day": 1
+    }
+  ],
+  "default_system_prompt_file": "../prompts/default_system_prompt.txt"
+}
