@@ -35,6 +35,16 @@ DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
 DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
 DEFAULT_SUPER_HIGH_MODEL = os.getenv("RAG_SUPER_HIGH_MODEL_ID", "qwen.qwen3-vl-235b-a22b")
+DEFAULT_SYSTEM_PROMPT = (
+    "You must answer ONLY using the Evidence blocks.\n"
+    "Output in Japanese.\n"
+    "Rules:\n"
+    "1) Cite evidence by block number like [1], [2]. Every factual claim MUST have a citation.\n"
+    "2) Do not assume missing conditions. If multiple interpretations exist, present branches clearly.\n"
+    "3) If the user's condition is missing for a final conclusion, ask ONE clarification question.\n"
+    "4) Say exactly 'Evidence is insufficient.' only when evidence has no explicit answer.\n"
+    "5) Do not quote evidence verbatim. Summarize.\n"
+)
 ANSWER_PROFILE_TO_MODEL = {
     "cost": "google.gemma-3-4b-it",
     "high": "google.gemma-3-27b-it",
@@ -222,6 +232,18 @@ def build_rule_based_answer(question: str, metadata: list[dict[str, Any]], today
         if answer is not None:
             return answer
     return None
+
+
+def load_system_prompt(path: str | None) -> str:
+    if path is None:
+        return DEFAULT_SYSTEM_PROMPT
+    prompt_path = Path(path).expanduser()
+    if not prompt_path.exists():
+        raise SystemExit(f"--system-prompt-file not found: {prompt_path}")
+    text = prompt_path.read_text(encoding="utf-8").strip()
+    if not text:
+        raise SystemExit(f"--system-prompt-file is empty: {prompt_path}")
+    return text
 
 
 def load_manifest(index_dir: Path) -> dict[str, Any]:
@@ -419,22 +441,13 @@ def build_evidence(
 def call_bedrock(
     question: str,
     evidence: str,
+    system_prompt: str,
     max_tokens: int,
     region: str,
     profile: str,
     model_id: str,
 ) -> str:
-    prompt = (
-        "You must answer ONLY using the Evidence blocks.\n"
-        "Output in Japanese.\n"
-        "Rules:\n"
-        "1) Cite evidence by block number like [1], [2]. Every factual claim MUST have a citation.\n"
-        "2) If the question is ambiguous in scope, ask ONE clarification question and "
-        "show candidate answers with citations in one line.\n"
-        "3) Say exactly 'Evidence is insufficient.' only when evidence has no explicit answer.\n"
-        "4) Do not quote evidence verbatim. Summarize.\n\n"
-        f"Question:\n{question}\n\nEvidence:\n{evidence}"
-    )
+    prompt = f"{system_prompt.rstrip()}\n\nQuestion:\n{question}\n\nEvidence:\n{evidence}"
 
     payload = {
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
@@ -519,6 +532,7 @@ def run_single_query(
     model: SentenceTransformer,
     query_prefix: str,
     answer_profile: str,
+    system_prompt: str,
 ) -> None:
     rule_answer = build_rule_based_answer(question=question, metadata=metadata, today=date.today())
 
@@ -567,6 +581,7 @@ def run_single_query(
     answer = call_bedrock(
         question=question,
         evidence=evidence,
+        system_prompt=system_prompt,
         max_tokens=args.max_tokens,
         region=args.region,
         profile=args.profile,
@@ -607,6 +622,11 @@ def parse_args() -> argparse.Namespace:
         help="Override Bedrock model ID directly. If set, --answer-profile is ignored.",
     )
     parser.add_argument(
+        "--system-prompt-file",
+        default=None,
+        help="Path to a custom system prompt text file.",
+    )
+    parser.add_argument(
         "--interactive",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -629,6 +649,7 @@ def main() -> None:
     query_prefix = manifest.get("query_prefix", "")
 
     model = SentenceTransformer(model_name)
+    system_prompt = load_system_prompt(args.system_prompt_file)
 
     selected_profile = args.answer_profile
     if args.interactive:
@@ -638,6 +659,8 @@ def main() -> None:
             selected_profile = prompt_answer_profile(args.answer_profile)
             selected_model = resolve_bedrock_model(selected_profile, None)
             print(f"[INFO] Using answer profile '{selected_profile}' ({selected_model})")
+        if args.system_prompt_file:
+            print(f"[INFO] Using custom system prompt: {args.system_prompt_file}")
         print("Interactive mode started. Type 'exit' or 'quit' to finish.")
         while True:
             try:
@@ -657,6 +680,7 @@ def main() -> None:
                 model=model,
                 query_prefix=query_prefix,
                 answer_profile=selected_profile,
+                system_prompt=system_prompt,
             )
             print()
         return
@@ -672,6 +696,7 @@ def main() -> None:
         model=model,
         query_prefix=query_prefix,
         answer_profile=selected_profile,
+        system_prompt=system_prompt,
     )
 
 

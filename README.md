@@ -335,7 +335,7 @@ python3 scripts/rag/rag_vector_cli.py \
   "質問文"
 
 # Super High Cost（最優先で高精度。必要に応じてモデルIDを環境変数で上書き）
-RAG_SUPER_HIGH_MODEL_ID=google.gemma-3-27b-it \
+RAG_SUPER_HIGH_MODEL_ID=qwen.qwen3-vl-235b-a22b \
 python3 scripts/rag/rag_vector_cli.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
   --answer-profile super-high \
@@ -344,6 +344,14 @@ python3 scripts/rag/rag_vector_cli.py \
 注記:
 - `RAG_SUPER_HIGH_MODEL_ID` に別モデルを指定する場合は、IAM ポリシーの `bedrock_allowed_model_ids` に同モデルを追加してください（未許可だと AccessDenied になります）。
 
+システムプロンプト差し替え例（汎用場合分け）:
+```bash
+python3 scripts/rag/rag_vector_cli.py \
+  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
+  --system-prompt-file /home/user/dev/vpnless-rag-mvp/scripts/rag/prompts/case_split_system_prompt.txt \
+  "質問文"
+```
+
 `rag_vector_cli.py` の主要既定値:
 - `--topk 5`
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
@@ -351,6 +359,7 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
 - `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`, `super-high=$RAG_SUPER_HIGH_MODEL_ID`。未設定時は `qwen.qwen3-vl-235b-a22b`）
 - `--bedrock-model`（明示指定時は `--answer-profile` より優先）
+- `--system-prompt-file`（システムプロンプトを外部ファイルで上書き）
 - `--interactive`（連続対話モード）
 - `--max-context-chars 12000`
 - `--max-tokens 512`
@@ -361,6 +370,7 @@ python3 scripts/rag/rag_vector_cli.py \
 - `Rerank` は候補の並び替えです。現実装では rerank で選ばれなかった候補も末尾に残します。
 - `=== TOPK EVIDENCE ===` に表示された根拠だけを使って回答させるプロンプトです。
 - 根拠が空の場合のみ `Evidence is insufficient.` を返します。
+- 既定のシステムプロンプトは「不足条件を推定しない」「必要なら場合分け」「最終確定に条件不足なら確認質問1つ」を指示します。
 - 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問では、制度ごとのルール定義に基づく日付計算を補助根拠として `=== TOPK EVIDENCE ===` に追加します。
 - 最終回答は常に `=== BEDROCK ANSWER ===` で返します（ローカル計算だけで回答を確定しません）。
 - この補助計算ルールは `rag_vector_cli.py` の `TEMPORAL_MILESTONE_RULES` に制度を追加することで拡張できます。
