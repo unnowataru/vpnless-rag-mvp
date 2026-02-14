@@ -46,7 +46,7 @@ log "aws cli"
     --output text || true
 } > "$OUT/02_aws_cli.txt" 2>&1
 
-# 3) NFS/VAST
+# 3) NFS/VAST Data/NetApp
 log "nfs/vast"
 {
   mount | grep -E "(/mnt/nfs2|kawa_nfs)" || true
