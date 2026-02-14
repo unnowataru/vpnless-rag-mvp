@@ -49,7 +49,7 @@ terraform apply
 - 月額予算: `90 USD`
 - 通知閾値: `45 / 70 / 85`
 - IAM ユーザー: `rag-bedrock-invoker`
-- Bedrock 呼び出し許可モデル: `google.gemma-3-4b-it`
+- Bedrock 呼び出し許可モデル: `google.gemma-3-4b-it`, `google.gemma-3-27b-it`
 - Rerank モデル: `amazon.rerank-v1:0`
 
 ## 7. Bedrock 疎通テスト（WSL）
@@ -68,14 +68,21 @@ bash scripts/connectivity/bedrock_converse.sh
 python3 -m pip install -r scripts/rag/requirements.txt
 ```
 
-2. ベクトル索引作成
+2. PDF から chunks.jsonl 生成
+```bash
+python3 scripts/rag/build_chunks_from_pdfs.py \
+  --pdf-dir /home/user/dev/vpnless-rag-mvp/rag_data/pdfs \
+  --out /home/user/dev/vpnless-rag-mvp/rag_data/index/chunks.jsonl
+```
+
+3. ベクトル索引作成
 ```bash
 python3 scripts/rag/build_vector_index.py \
   --chunks /path/to/chunks.jsonl \
   --index-dir /path/to/rag_index
 ```
 
-3. RAG 実行
+4. RAG 実行
 ```bash
 python3 scripts/rag/rag_vector_cli.py \
   --index-dir /path/to/rag_index \
@@ -87,6 +94,8 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
 - `--rerank-model amazon.rerank-v1:0`
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
+- `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`）
+- `--bedrock-model`（明示指定時は `--answer-profile` より優先）
 - `--max-context-chars 12000`
 - `--max-tokens 512`
 - `--region ap-northeast-1`

@@ -49,6 +49,7 @@ data "aws_iam_policy_document" "bedrock_invoker" {
     ]
     resources = [
       "arn:aws:bedrock:ap-northeast-1::foundation-model/google.gemma-3-4b-it",
+      "arn:aws:bedrock:ap-northeast-1::foundation-model/google.gemma-3-27b-it",
       "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.titan-embed-text-v2:0"
     ]
   }

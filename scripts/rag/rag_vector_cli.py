@@ -29,10 +29,13 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
     ) from exc
 
 
-DEFAULT_BEDROCK_MODEL = "google.gemma-3-4b-it"
 DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
 DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
+ANSWER_PROFILE_TO_MODEL = {
+    "cost": "google.gemma-3-4b-it",
+    "high": "google.gemma-3-27b-it",
+}
 
 EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
 TEL_RE = re.compile(r"\b\d{2,4}-\d{2,4}-\d{3,4}\b")
@@ -294,6 +297,15 @@ def call_bedrock(
             pass
 
 
+def resolve_bedrock_model(answer_profile: str, bedrock_model: str | None) -> str:
+    if bedrock_model:
+        return bedrock_model
+    try:
+        return ANSWER_PROFILE_TO_MODEL[answer_profile]
+    except KeyError as exc:
+        raise SystemExit(f"Unsupported --answer-profile: {answer_profile}") from exc
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--index-dir", required=True, help="Path to vector index directory")
@@ -310,7 +322,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
-    parser.add_argument("--bedrock-model", default=DEFAULT_BEDROCK_MODEL)
+    parser.add_argument(
+        "--answer-profile",
+        choices=["cost", "high"],
+        default="cost",
+        help=(
+            "Select answer model profile. "
+            "cost=google.gemma-3-4b-it, high=google.gemma-3-27b-it."
+        ),
+    )
+    parser.add_argument(
+        "--bedrock-model",
+        default=None,
+        help="Override Bedrock model ID directly. If set, --answer-profile is ignored.",
+    )
     parser.add_argument("question", nargs="*")
     return parser.parse_args()
 
@@ -358,13 +383,14 @@ def main() -> None:
         print("Evidence is insufficient.")
         return
 
+    bedrock_model = resolve_bedrock_model(args.answer_profile, args.bedrock_model)
     answer = call_bedrock(
         question=question,
         evidence=evidence,
         max_tokens=args.max_tokens,
         region=args.region,
         profile=args.profile,
-        model_id=args.bedrock_model,
+        model_id=bedrock_model,
     )
     print(answer)
 
