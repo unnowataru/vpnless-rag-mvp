@@ -33,6 +33,10 @@ resource "aws_budgets_budget" "monthly" {
 # --- Bedrock invoker (app/on-prem) ---
 resource "aws_iam_user" "bedrock_invoker" {
   name = "rag-bedrock-invoker"
+
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 data "aws_iam_policy_document" "bedrock_invoker" {
@@ -43,7 +47,28 @@ data "aws_iam_policy_document" "bedrock_invoker" {
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream"
     ]
-    resources = ["arn:aws:bedrock:ap-northeast-1::foundation-model/google.gemma-3-4b-it"]
+    resources = [
+      "arn:aws:bedrock:ap-northeast-1::foundation-model/google.gemma-3-4b-it",
+      "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.titan-embed-text-v2:0"
+    ]
+  }
+
+  statement {
+    sid    = "InvokeRerankerModel"
+    effect = "Allow"
+    actions = [
+      "bedrock:InvokeModel"
+    ]
+    resources = [
+      "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.rerank-v1:0"
+    ]
+  }
+
+  statement {
+    sid       = "RerankDocuments"
+    effect    = "Allow"
+    actions   = ["bedrock:Rerank"]
+    resources = ["*"]
   }
 
   # Optional: allow listing models for troubleshooting
