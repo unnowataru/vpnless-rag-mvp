@@ -417,3 +417,6 @@ bash scripts/audit/collect_linux.sh
 - P1: VAST Data / NetApp / マネージド連携: `#4` https://github.com/unnowataru/vpnless-rag-mvp/issues/4
 - P1: イベント駆動インデクシング: `#5` https://github.com/unnowataru/vpnless-rag-mvp/issues/5
 - P2: 監査ログ運用（相関ID・TTL・マスク）: `#6` https://github.com/unnowataru/vpnless-rag-mvp/issues/6
+
+## License
+MIT License（`LICENSE` を参照）
