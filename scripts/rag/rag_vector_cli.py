@@ -34,7 +34,7 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
 DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
 DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
-DEFAULT_SUPER_HIGH_MODEL = os.getenv("RAG_SUPER_HIGH_MODEL_ID", "google.gemma-3-27b-it")
+DEFAULT_SUPER_HIGH_MODEL = os.getenv("RAG_SUPER_HIGH_MODEL_ID", "qwen.qwen3-vl-235b-a22b")
 ANSWER_PROFILE_TO_MODEL = {
     "cost": "google.gemma-3-4b-it",
     "high": "google.gemma-3-27b-it",
@@ -598,7 +598,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Select answer model profile. "
             "cost=google.gemma-3-4b-it, high=google.gemma-3-27b-it, "
-            "super-high=$RAG_SUPER_HIGH_MODEL_ID (default: google.gemma-3-27b-it)."
+            "super-high=$RAG_SUPER_HIGH_MODEL_ID (default: qwen.qwen3-vl-235b-a22b)."
         ),
     )
     parser.add_argument(

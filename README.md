@@ -349,7 +349,7 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
 - `--rerank-model amazon.rerank-v1:0`
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
-- `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`, `super-high=$RAG_SUPER_HIGH_MODEL_ID`。未設定時は `google.gemma-3-27b-it`）
+- `--answer-profile cost`（`cost=google.gemma-3-4b-it`, `high=google.gemma-3-27b-it`, `super-high=$RAG_SUPER_HIGH_MODEL_ID`。未設定時は `qwen.qwen3-vl-235b-a22b`）
 - `--bedrock-model`（明示指定時は `--answer-profile` より優先）
 - `--interactive`（連続対話モード）
 - `--max-context-chars 12000`
