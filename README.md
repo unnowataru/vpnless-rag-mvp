@@ -8,37 +8,37 @@
 - オンプレ側で関連チャンク（Top-K根拠）を検索
 - `質問 + Top-K根拠` だけを Bedrock に渡して回答生成
 
-## 0. 設計思想（検証プラン由来）
-`rag_data/appendix/AWS Bedrock & VAST DATA検証プラン.pdf` の思想を、MVPとして次の方針に落とし込んでいます。
+## 設計原則
+本プロジェクトは、次の原則で構成しています。
 
 - データ主権: 原本・メタデータ・権限情報の正本はオンプレ側に置く。
 - 最小開示: クラウドへ送る情報は「質問 + 許可済みTop-K根拠」を原則とし、必要に応じてマスクで制御する。
 - 統制と説明可能性: 最小権限と監査可能な運用を前提にし、将来の相関ID/TTL制御へ拡張可能な形で設計する。
 - 可搬性: 計算リソースの配置は固定せず、将来のオンプレ回帰/ハイブリッド継続に対応できる構成を志向する。
 
-## 1. 目的
+## 目的
 - オンプレ側を source-of-truth とし、原本ファイルを AWS に保存しない。
 - Bedrock には「質問 + マスク済み Top-K 根拠チャンク」のみ送信する。
 
-## 2. スコープ（MVP）
+## スコープ（MVP）
 - 索引作成・検索はローカル Linux で実行。
 - AWS 側に S3 / Knowledge Base / OpenSearch を常設しない。
 - Terraform では予算管理と Bedrock 呼び出し IAM のみを管理。
 
-## 3. 前提環境（Linux）
+## 前提環境（Linux）
 - Ubuntu 22.04+（WSL2 上の Ubuntu を含む）
 - Python 3.10+
 - AWS CLI v2
 - Terraform 1.6+
 
-## 4. リポジトリ構成
+## リポジトリ構成
 - `infra/live/prod`: Terraform ルートモジュール（Budget + IAM）
 - `infra/modules`: Terraform 共通モジュール
 - `scripts/connectivity`: Bedrock 疎通テスト
 - `scripts/rag`: ベクトル索引作成 + RAG 実行
 - `scripts/audit`: Linux 監査情報収集
 
-## 5. AWS プロファイル
+## AWS プロファイル
 - `tf-admin`: Terraform 実行用
 - `rag`: Bedrock 推論実行用
 
@@ -51,7 +51,7 @@ region = ap-northeast-1
 region = ap-northeast-1
 ```
 
-## 6. Terraform（Linux から実行）
+## Terraform（Linux から実行）
 ```bash
 cd infra/live/prod
 cp terraform.tfvars.example terraform.tfvars
@@ -62,14 +62,14 @@ terraform apply
 
 `infra/root` からの移行手順は `infra/live/prod/README.md` を参照してください。
 
-実装済み内容:
+Terraform 管理対象:
 - 月額予算: `90 USD`
 - 通知閾値: `45 / 70 / 85`
 - IAM ユーザー: `rag-bedrock-invoker`
 - Bedrock 呼び出し許可モデル: `google.gemma-3-4b-it`, `google.gemma-3-27b-it`
 - Rerank モデル: `amazon.rerank-v1:0`
 
-## 7. Bedrock 疎通テスト（Linux）
+## Bedrock 疎通テスト（Linux）
 ```bash
 bash scripts/connectivity/bedrock_converse.sh
 ```
@@ -79,7 +79,7 @@ bash scripts/connectivity/bedrock_converse.sh
 - `AWS_REGION`（既定: `ap-northeast-1`）
 - `BEDROCK_MODEL_ID`（既定: `google.gemma-3-4b-it`）
 
-## 8. ベクトルRAG実行
+## ベクトルRAG実行
 現実装は次のパイプラインです。
 - PDF からテキスト抽出して `chunks.jsonl` を作成
 - ローカルでベクトル索引（FAISS または numpy）を作成
@@ -177,19 +177,19 @@ python3 scripts/rag/rag_vector_cli.py \
 - `=== TOPK EVIDENCE ===` に表示された根拠だけを使って回答させるプロンプトです。
 - 根拠が空の場合のみ `Evidence is insufficient.` を返します。
 
-## 9. Linux監査収集
+## Linux監査収集
 ```bash
 bash scripts/audit/collect_linux.sh
 ```
 
-## 10. 秘密情報と成果物
+## 秘密情報と成果物
 - 秘密情報はリポジトリ外で管理する。
 - `.gitignore` で以下を除外:
   - `rag_data/`
   - `*.jsonl`, `*.pdf`, `*.faiss`, `*.npy`
   - `logs/`
 
-## 11. 差分・実装計画（Issue管理）
+## 差分・実装計画（Issue）
 検証プランPDFとの差分と今後の実装候補は、更新履歴を残しやすいよう GitHub Issue で管理します。
 
 - 差分トラッカー: `#1` https://github.com/unnowataru/vpnless-rag-mvp/issues/1
