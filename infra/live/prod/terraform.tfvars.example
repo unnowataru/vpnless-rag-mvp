@@ -1,0 +1,18 @@
+aws_region = "ap-northeast-1"
+
+# null にすると AWS_PROFILE 環境変数または default credential chain を使用
+aws_profile = "tf-admin"
+
+budget_subscriber_emails = ["your-email@example.com"]
+
+# 必要に応じて調整
+budget_limit_amount            = 90
+budget_notification_thresholds = [45, 70, 85]
+
+bedrock_allowed_model_ids = [
+  "google.gemma-3-4b-it",
+  "google.gemma-3-27b-it",
+  "amazon.titan-embed-text-v2:0"
+]
+
+bedrock_rerank_model_id = "amazon.rerank-v1:0"

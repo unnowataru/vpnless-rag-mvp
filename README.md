@@ -1,25 +1,39 @@
 # vpnless-rag-mvp
 
-このリポジトリは **WSL（Linux）専用**で運用する前提です。  
-オンプレを正本とし、AWS Bedrock は生成処理のみに使います。
+このリポジトリは **「オンプレに置いたPDFを根拠に、クラウドAI（AWS Bedrock）で回答するRAG」** を実装するためのものです。  
+運用前提は **Linux（Ubuntu推奨。WSL上のUbuntuでも可）** で、原本データはオンプレに保持したまま、クラウドには最小限の情報だけを送ります。
+
+動作イメージ:
+- PDF原本はオンプレ側に置く（source-of-truth）
+- オンプレ側で関連チャンク（Top-K根拠）を検索
+- `質問 + Top-K根拠` だけを Bedrock に渡して回答生成
+
+## 0. 設計思想（検証プラン由来）
+`rag_data/appendix/AWS Bedrock & VAST DATA検証プラン.pdf` の思想を、MVPとして次の方針に落とし込んでいます。
+
+- データ主権: 原本・メタデータ・権限情報の正本はオンプレ側に置く。
+- 最小開示: クラウドへ送る情報は「質問 + 許可済みTop-K根拠」を原則とし、必要に応じてマスクで制御する。
+- 統制と説明可能性: 最小権限と監査可能な運用を前提にし、将来の相関ID/TTL制御へ拡張可能な形で設計する。
+- 可搬性: 計算リソースの配置は固定せず、将来のオンプレ回帰/ハイブリッド継続に対応できる構成を志向する。
 
 ## 1. 目的
 - オンプレ側を source-of-truth とし、原本ファイルを AWS に保存しない。
 - Bedrock には「質問 + マスク済み Top-K 根拠チャンク」のみ送信する。
 
 ## 2. スコープ（MVP）
-- 索引作成・検索はローカル（WSL/Linux）で実行。
+- 索引作成・検索はローカル Linux で実行。
 - AWS 側に S3 / Knowledge Base / OpenSearch を常設しない。
 - Terraform では予算管理と Bedrock 呼び出し IAM のみを管理。
 
-## 3. 前提環境（WSL）
-- WSL2（Ubuntu 推奨）
+## 3. 前提環境（Linux）
+- Ubuntu 22.04+（WSL2 上の Ubuntu を含む）
 - Python 3.10+
 - AWS CLI v2
 - Terraform 1.6+
 
 ## 4. リポジトリ構成
-- `infra/root`: Terraform（Budget + IAM）
+- `infra/live/prod`: Terraform ルートモジュール（Budget + IAM）
+- `infra/modules`: Terraform 共通モジュール
 - `scripts/connectivity`: Bedrock 疎通テスト
 - `scripts/rag`: ベクトル索引作成 + RAG 実行
 - `scripts/audit`: Linux 監査情報収集
@@ -37,13 +51,16 @@ region = ap-northeast-1
 region = ap-northeast-1
 ```
 
-## 6. Terraform（WSL から実行）
+## 6. Terraform（Linux から実行）
 ```bash
-cd infra/root
+cd infra/live/prod
+cp terraform.tfvars.example terraform.tfvars
 terraform init
 terraform plan
 terraform apply
 ```
+
+`infra/root` からの移行手順は `infra/live/prod/README.md` を参照してください。
 
 実装済み内容:
 - 月額予算: `90 USD`
@@ -52,7 +69,7 @@ terraform apply
 - Bedrock 呼び出し許可モデル: `google.gemma-3-4b-it`, `google.gemma-3-27b-it`
 - Rerank モデル: `amazon.rerank-v1:0`
 
-## 7. Bedrock 疎通テスト（WSL）
+## 7. Bedrock 疎通テスト（Linux）
 ```bash
 bash scripts/connectivity/bedrock_converse.sh
 ```
@@ -75,7 +92,18 @@ source /home/user/vpnless-rag-venv/bin/activate
 python3 -m pip install -r scripts/rag/requirements.txt
 ```
 
-2. PDF から chunks.jsonl 生成
+2. PDF 配置先（先に作成）
+```bash
+mkdir -p /home/user/dev/vpnless-rag-mvp/rag_data/pdfs
+mkdir -p /home/user/dev/vpnless-rag-mvp/rag_data/index
+```
+
+配置パス:
+- Linux パス（推奨）: `/home/<linux-user>/dev/vpnless-rag-mvp/rag_data/pdfs`
+- リポジトリ相対: `rag_data/pdfs`
+- Windows から WSL を開く場合: `\\wsl.localhost\\Ubuntu-24.04\\home\\<linux-user>\\dev\\vpnless-rag-mvp\\rag_data\\pdfs`
+
+3. PDF から chunks.jsonl 生成
 ```bash
 python3 scripts/rag/build_chunks_from_pdfs.py \
   --pdf-dir /home/user/dev/vpnless-rag-mvp/rag_data/pdfs \
@@ -93,7 +121,7 @@ python3 scripts/rag/build_chunks_from_pdfs.py \
 - 現実装では `--pdf-dir` 配下の PDF をまとめて索引化します（文書種別の自動フィルタなし）。
   必要な文書だけを検索対象にする場合は、PDF 配置ディレクトリを分けるか `--glob` で絞ってください。
 
-3. ベクトル索引作成
+4. ベクトル索引作成
 ```bash
 python3 scripts/rag/build_vector_index.py \
   --chunks /home/user/dev/vpnless-rag-mvp/rag_data/index/chunks.jsonl \
@@ -110,7 +138,7 @@ python3 scripts/rag/build_vector_index.py \
 - `metadata.jsonl`
 - `manifest.json`
 
-4. RAG 実行
+5. RAG 実行
 ```bash
 python3 scripts/rag/rag_vector_cli.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
@@ -161,30 +189,12 @@ bash scripts/audit/collect_linux.sh
   - `*.jsonl`, `*.pdf`, `*.faiss`, `*.npy`
   - `logs/`
 
-## 11. 現在の制約（検証プランPDFとの差分）
-この README は **現在実装済みの挙動** を正として記載しています。  
-`rag_data/appendix/AWS Bedrock & VAST DATA検証プラン.pdf` は検証計画であり、以下は現実装との差分です（本文では製品名を `VAST Data` と表記）。
+## 11. 差分・実装計画（Issue管理）
+検証プランPDFとの差分と今後の実装候補は、更新履歴を残しやすいよう GitHub Issue で管理します。
 
-| 項目 | 現在の実装状態 | 補足 |
-|---|---|---|
-| 検索基盤（VAST Data / NetApp / マネージド連携） | 未実装 | WSL ローカル索引（FAISS / numpy）のみ |
-| ベクトルDB（マネージド） | 未実装 | OpenSearch Serverless / Aurora pgvector など未接続 |
-| UI（OpenWebUI） | 未実装 | 実行インターフェースは CLI のみ |
-| API 受け口（`/search`） | 未実装 | サービス化していない |
-| ACL / metadata フィルタ検索 | 未実装 | 索引内の全チャンクが候補。文書種別での絞り込みは手動運用 |
-| インデクシング更新 | 未実装（自動） | 手動で PDF 取り込み → `chunks.jsonl` 再生成 → 索引再作成 |
-| 監査ログ設計（相関ID/TTL） | 未実装 | `scripts/audit/collect_linux.sh` での収集中心 |
-| 情報最小化統制（Tier分類など） | 部分実装 | メール/電話の簡易マスクのみ |
-
-## 12. 現時点で実装済みの範囲
-- WSL ローカルでの PDF 取り込み、チャンク化、ベクトル索引作成。
-- ベクトル検索 + Bedrock Rerank（`amazon.rerank-v1:0`）で候補並び替え。
-- Bedrock Converse での回答生成（`cost` / `high` モデル切替）。
-- Terraform による予算管理と Bedrock 呼び出し IAM 管理。
-
-## 13. 今後の実装候補（優先順）
-1. P0: metadata フィルタ（文書カテゴリ・有効日・部門など）を検索時に適用。
-2. P0: `/search` API 化（CLI 依存を解消し、UI/外部連携可能にする）。
-3. P1: VAST Data / NetApp 連携、またはマネージドベクトルDB連携（OpenSearch Serverless など）を追加。
-4. P1: 差分更新前提のイベント駆動インデクシング。
-5. P2: 監査ログ運用（相関ID、保持期間、マスク方針）の実装。
+- 差分トラッカー: `#1` https://github.com/unnowataru/vpnless-rag-mvp/issues/1
+- P0: metadataフィルタ検索: `#2` https://github.com/unnowataru/vpnless-rag-mvp/issues/2
+- P0: `/search` API: `#3` https://github.com/unnowataru/vpnless-rag-mvp/issues/3
+- P1: VAST Data / NetApp / マネージド連携: `#4` https://github.com/unnowataru/vpnless-rag-mvp/issues/4
+- P1: イベント駆動インデクシング: `#5` https://github.com/unnowataru/vpnless-rag-mvp/issues/5
+- P2: 監査ログ運用（相関ID・TTL・マスク）: `#6` https://github.com/unnowataru/vpnless-rag-mvp/issues/6
