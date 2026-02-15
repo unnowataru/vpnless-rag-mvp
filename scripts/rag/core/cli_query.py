@@ -15,6 +15,8 @@ from core.query_runtime import AnswerProfileConfig
 from core.query_runtime import TemporalMilestoneRule
 from core.query_runtime import sanitize
 from core.retriever_fallback import FallbackRetriever
+from core.retrieval_stats import attach_backend_metadata
+from core.retrieval_stats import build_retrieval_stats
 
 
 def prompt_answer_profile(
@@ -100,11 +102,13 @@ def run_single_query(
                 top_k=top_k,
                 filters=filters,
             )
-            stats = dict(diagnostics.stats)
-            stats["retriever_backend_used"] = "local"
-            stats["fallback_triggered"] = False
-            stats["fallback_error"] = None
-            stats["fallback_error_type"] = None
+            stats = attach_backend_metadata(
+                dict(diagnostics.stats),
+                backend_used="local",
+                fallback_triggered=False,
+                fallback_error=None,
+                fallback_error_type=None,
+            )
             return diagnostics.hits, stats
 
         fallback_result = external_fallback_retriever.search_with_fallback(
@@ -112,17 +116,17 @@ def run_single_query(
             top_k=top_k,
             filters=filters,
         )
-        stats = {
-            "hits_before_filter": len(fallback_result.hits),
-            "hits_after_filter": len(fallback_result.hits),
-            "hits_after_rerank": len(fallback_result.hits),
-            "filter_pass_rate": 1.0 if fallback_result.hits else 0.0,
-            "zero_hit": len(fallback_result.hits) == 0,
-            "retriever_backend_used": fallback_result.backend_used,
-            "fallback_triggered": fallback_result.fallback_triggered,
-            "fallback_error": fallback_result.error,
-            "fallback_error_type": fallback_result.error_type,
-        }
+        stats = attach_backend_metadata(
+            build_retrieval_stats(
+                total_hits_before_filter=len(fallback_result.hits),
+                total_hits_after_filter=len(fallback_result.hits),
+                total_hits_after_rerank=len(fallback_result.hits),
+            ),
+            backend_used=fallback_result.backend_used,
+            fallback_triggered=fallback_result.fallback_triggered,
+            fallback_error=fallback_result.error,
+            fallback_error_type=fallback_result.error_type,
+        )
         return fallback_result.hits, stats
 
     try:

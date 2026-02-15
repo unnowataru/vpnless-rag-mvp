@@ -4,31 +4,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from core.bootstrap import build_backend_retrievers
+from core.bootstrap import build_local_retriever
+from core.bootstrap import load_runtime_artifacts
 from core.cli_args import parse_args
 from core.cli_args import validate_args
 from core.cli_query import prompt_answer_profile
 from core.cli_query import run_single_query
-from core.local_retriever import LocalVectorRetriever
-from core.local_retriever import load_manifest
-from core.local_retriever import load_metadata
-from core.query_runtime import load_runtime_config
-from core.query_runtime import load_system_prompt
 from core.query_runtime import parse_filters_json
 from core.query_runtime import resolve_bedrock_model
 from core.query_runtime import select_default_answer_profile
-from core.retriever_external import ExternalRetriever
-from core.retriever_external import ExternalRetrieverConfig
 from core.retriever_fallback import FallbackRetriever
-from core.retriever_vast import VastRetriever
-from core.retriever_vast import VastRetrieverConfig
-
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError as exc:  # pragma: no cover - runtime guidance
-    raise SystemExit(
-        "Missing dependency: sentence-transformers. "
-        "Install with: pip install -r scripts/rag/requirements.txt"
-    ) from exc
 
 
 def main() -> None:
@@ -51,69 +37,36 @@ def main() -> None:
     args.explicit_retrieval_filters = parse_filters_json(args.filters_json)
 
     index_dir = Path(args.index_dir)
-
-    manifest = load_manifest(index_dir)
-    metadata = load_metadata(index_dir)
-    model_name = manifest["embedding_model"]
-    query_prefix = manifest.get("query_prefix", "")
-    runtime_config = load_runtime_config(args.runtime_config_file)
+    artifacts = load_runtime_artifacts(
+        index_dir=index_dir,
+        runtime_config_file=args.runtime_config_file,
+        system_prompt_file=args.system_prompt_file,
+    )
+    runtime_config = artifacts.runtime_config
+    metadata = artifacts.metadata
     args.runtime_default_retrieval_filters = runtime_config.default_retrieval_filters
 
-    model = SentenceTransformer(model_name)
-    system_prompt = load_system_prompt(args.system_prompt_file, runtime_config.default_system_prompt_file)
-    local_retriever = LocalVectorRetriever(
+    system_prompt = artifacts.system_prompt
+    local_retriever = build_local_retriever(
         index_dir=index_dir,
-        backend=manifest["backend"],
+        manifest=artifacts.manifest,
         metadata=metadata,
-        model=model,
-        query_prefix=query_prefix,
         snippet_chars=args.snippet_max_chars,
     )
     external_fallback_retriever: FallbackRetriever | None = None
+    vast_retriever, external_retriever = build_backend_retrievers(
+        local_retriever=local_retriever,
+        vast_endpoint=args.vast_endpoint,
+        vast_collection=args.vast_collection,
+        external_endpoint=args.external_endpoint,
+        external_provider=args.external_provider,
+        timeout_sec=args.aws_timeout_sec,
+        local_fallback_on_retriever_error=args.local_fallback_on_retriever_error,
+    )
     if args.retriever_backend == "vast":
-        primary = VastRetriever(
-            VastRetrieverConfig(
-                endpoint=args.vast_endpoint,
-                collection=args.vast_collection,
-                timeout_sec=args.aws_timeout_sec,
-            )
-        )
-        if args.local_fallback_on_retriever_error:
-            external_fallback_retriever = FallbackRetriever(
-                primary_name="vast",
-                primary=primary,
-                fallback_name="local",
-                fallback=local_retriever,
-            )
-        else:
-            external_fallback_retriever = FallbackRetriever(
-                primary_name="vast",
-                primary=primary,
-                fallback_name="vast",
-                fallback=primary,
-            )
+        external_fallback_retriever = vast_retriever
     elif args.retriever_backend == "external":
-        primary = ExternalRetriever(
-            ExternalRetrieverConfig(
-                endpoint=args.external_endpoint,
-                provider=args.external_provider,
-                timeout_sec=args.aws_timeout_sec,
-            )
-        )
-        if args.local_fallback_on_retriever_error:
-            external_fallback_retriever = FallbackRetriever(
-                primary_name=args.external_provider,
-                primary=primary,
-                fallback_name="local",
-                fallback=local_retriever,
-            )
-        else:
-            external_fallback_retriever = FallbackRetriever(
-                primary_name=args.external_provider,
-                primary=primary,
-                fallback_name=args.external_provider,
-                fallback=primary,
-            )
+        external_fallback_retriever = external_retriever
 
     configured_default = select_default_answer_profile(runtime_config.answer_profiles)
     selected_profile = args.answer_profile or configured_default

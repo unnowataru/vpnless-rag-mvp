@@ -14,6 +14,7 @@ from .bedrock_client import AwsCliBedrockClient
 from .retriever_contract import RetrievalHit
 from .retriever_contract import validate_filters
 from .scope_resolver import infer_doc_id_scope_filters
+from .text_sanitizer import sanitize as shared_sanitize
 
 FALLBACK_SYSTEM_PROMPT = (
     "You must answer ONLY using the Evidence blocks.\n"
@@ -28,8 +29,6 @@ FALLBACK_SYSTEM_PROMPT = (
     "7) Do not quote evidence verbatim. Summarize.\n"
 )
 
-EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
-TEL_RE = re.compile(r"\b\d{2,4}-\d{2,4}-\d{3,4}\b")
 JOIN_DATE_RE = re.compile(r"([0-9０-９]{4})\s*年\s*([0-9０-９]{1,2})\s*月\s*([0-9０-９]{1,2})\s*日")
 SERVICE_YEARS_WITH_DAYS_RE = re.compile(r"([0-9０-９]{1,2})\s*年\s*([0-9０-９]{1,2})\s*日")
 SERVICE_YEARS_WITH_KEYWORD_RE = re.compile(r"(?:勤続|在籍)\s*([0-9０-９]{1,2})\s*年")
@@ -62,9 +61,8 @@ class RuntimeConfig:
 
 
 def sanitize(text: str) -> str:
-    text = EMAIL_RE.sub("[EMAIL]", text)
-    text = TEL_RE.sub("[TEL]", text)
-    return text
+    # Keep public import path stable while using a single shared implementation.
+    return shared_sanitize(text)
 
 
 def normalize_digits(text: str) -> str:

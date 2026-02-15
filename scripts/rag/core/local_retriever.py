@@ -13,6 +13,7 @@ from .retriever_contract import RetrievalHit
 from .retriever_contract import Retriever
 from .retriever_contract import build_hit_from_row
 from .retriever_contract import validate_filters
+from .retrieval_stats import build_retrieval_stats
 
 try:
     import faiss  # type: ignore
@@ -141,25 +142,6 @@ def _row_matches_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:
         if not _matches_filter_value(actual, expected):
             return False
     return True
-
-
-def build_retrieval_stats(
-    total_hits_before_filter: int,
-    total_hits_after_filter: int,
-    total_hits_after_rerank: int,
-) -> dict[str, Any]:
-    pass_rate = (
-        float(total_hits_after_filter) / float(total_hits_before_filter)
-        if total_hits_before_filter > 0
-        else 0.0
-    )
-    return {
-        "hits_before_filter": total_hits_before_filter,
-        "hits_after_filter": total_hits_after_filter,
-        "hits_after_rerank": total_hits_after_rerank,
-        "filter_pass_rate": pass_rate,
-        "zero_hit": total_hits_after_filter == 0,
-    }
 
 
 @dataclass(frozen=True)

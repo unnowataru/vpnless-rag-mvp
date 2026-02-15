@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import Any
 
 from .retriever_contract import RetrievalHit
 from .retriever_contract import serialize_hit
-
-EMAIL_RE = re.compile(r"\b[\w\.-]+@[\w\.-]+\.\w+\b")
-TEL_RE = re.compile(r"\b\d{2,4}-\d{2,4}-\d{3,4}\b")
+from .text_sanitizer import sanitize as shared_sanitize
 
 
 def sanitize(text: str) -> str:
-    text = EMAIL_RE.sub("[EMAIL]", text)
-    text = TEL_RE.sub("[TEL]", text)
-    return text
+    # Keep public import path stable while using a single shared implementation.
+    return shared_sanitize(text)
 
 
 def build_evidence(

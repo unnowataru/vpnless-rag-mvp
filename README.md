@@ -18,6 +18,7 @@
 <summary>全セクション目次（展開）</summary>
 
 - [設計原則](#design-principles)
+- [現在地（実装ステータス）](#current-status)
 - [MVPスコープ](#scope)
 - [インフラ観点の配置と責務](#infra-roles)
 - [データフロー](#data-flow)
@@ -57,26 +58,6 @@ bash scripts/connectivity/bedrock_converse.sh
 python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 ```
 
-<a id="current-status"></a>
-## 現在地（実装ステータス）
-最終確認日: `2026-02-15`
-
-本章は「実装コード + テスト + ADR」を根拠に、現時点の到達点を整理したものです。
-
-| 論点 | 状態 | 根拠（実装） | コメント |
-|---|---|---|---|
-| チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py`, `scripts/rag/core/chunk_*.py`, `scripts/rag/core/pdf_extractor.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。extract/normalize/chunker/quality の責務分割を完了。OCR実処理は未実装。 |
-| Retriever Contract固定 + スコープ運用 | 完了 | `scripts/rag/core/retriever_contract.py`, `scripts/rag/core/scope_resolver.py`, `docs/adr/0001-retriever-contract-and-scope.md` | `search(query_text, top_k, filters) -> hits[]` と許可filterキーを固定。既定は fail-closed（未スコープ時は停止）。 |
-| metadataフィルタ検索 | 完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/core/local_retriever.py` | `--filters-json`、runtime default、自動docスコープ推定を実装。`retrieval_stats` も出力。 |
-| API受け口（/search, /qa, 連携I/F） | 部分完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` に加え、`/v1/models`, `/v1/chat/completions`, `/integrations/dify/qa` を提供。API単体（curl）疎通は確認済み。OpenWebUI/Dify本体デプロイでの実機E2E確認は未完了。 |
-| 差分更新（doc単位） | 部分完了 | `scripts/rag/build_vector_index_incremental.py` | merge/upsert/delete、`backfill/incremental`、fingerprint保存まで実装。イベント駆動トリガは未実装。 |
-| VAST/NetApp準備 | 準備完了（接続は未） | `scripts/rag/core/retriever_vast.py`, `scripts/rag/core/retriever_external.py`, `docs/adr/0002-vast-readiness.md`, `docs/adr/0003-netapp-readiness.md` | アダプタ枠とフォールバック、契約は実装済み。実エンドポイント接続と性能試験は未実施。 |
-| 監査ログ運用 | 部分完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/rag_api_server.py`, `scripts/rag/core/audit.py` | `request_id`、scope/filter、backend/fallback、retrieval_stats を監査ログ化。TTL/保持削除運用は未実装。 |
-
-検証結果（ローカル実行）:
-- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（44 tests）
-- `python3 scripts/rag/eval/eval_retrieval.py ...` -> `Recall@K=1.0, MRR=1.0, NDCG@K=1.0`
-
 <a id="design-principles"></a>
 ## 設計原則
 本プロジェクトは、次の原則で構成しています。
@@ -96,6 +77,26 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 ## 目的
 - オンプレ側を source-of-truth とし、原本ファイルを AWS に保存しない。
 - Bedrock には「質問 + マスク済み Top-K 根拠チャンク」のみ送信する。
+
+<a id="current-status"></a>
+## 現在地（実装ステータス）
+最終確認日: `2026-02-15`
+
+本章は「実装コード + テスト + ADR」を根拠に、現時点の到達点を整理したものです。
+
+| 論点 | 状態 | 根拠（実装） | コメント |
+|---|---|---|---|
+| チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py`, `scripts/rag/core/chunk_*.py`, `scripts/rag/core/pdf_extractor.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。extract/normalize/chunker/quality の責務分割を完了。OCR実処理は未実装。 |
+| Retriever Contract固定 + スコープ運用 | 完了 | `scripts/rag/core/retriever_contract.py`, `scripts/rag/core/scope_resolver.py`, `docs/adr/0001-retriever-contract-and-scope.md` | `search(query_text, top_k, filters) -> hits[]` と許可filterキーを固定。既定は fail-closed（未スコープ時は停止）。 |
+| metadataフィルタ検索 | 完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/core/local_retriever.py` | `--filters-json`、runtime default、自動docスコープ推定を実装。`retrieval_stats` も出力。 |
+| API受け口（/search, /qa, 連携I/F） | 部分完了 | `scripts/rag/rag_api_server.py`, `scripts/rag/api_bootstrap.py`, `scripts/rag/api_transport.py`, `scripts/rag/api_endpoints.py` | HTTP APIは endpoint/transport/bootstrap に責務分割済み。`/health`, `/search`, `/qa`, `/v1/models`, `/v1/chat/completions`, `/integrations/dify/qa` を提供。API単体（curl）疎通は確認済み。OpenWebUI/Dify本体デプロイでの実機E2E確認は未完了。 |
+| 差分更新（doc単位） | 部分完了 | `scripts/rag/build_vector_index_incremental.py` | merge/upsert/delete、`backfill/incremental`、fingerprint保存まで実装。イベント駆動トリガは未実装。 |
+| VAST/NetApp準備 | 準備完了（接続は未） | `scripts/rag/core/retriever_vast.py`, `scripts/rag/core/retriever_external.py`, `docs/adr/0002-vast-readiness.md`, `docs/adr/0003-netapp-readiness.md` | アダプタ枠とフォールバック、契約は実装済み。実エンドポイント接続と性能試験は未実施。 |
+| 監査ログ運用 | 部分完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/rag_api_server.py`, `scripts/rag/core/audit.py` | `request_id`、scope/filter、backend/fallback、retrieval_stats を監査ログ化。TTL/保持削除運用は未実装。 |
+
+検証結果（ローカル実行）:
+- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（55 tests）
+- `python3 scripts/rag/eval/eval_retrieval.py ...` -> `Recall@K=1.0, MRR=1.0, NDCG@K=1.0`
 
 <a id="scope"></a>
 ## MVPスコープ
@@ -146,6 +147,12 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 - `infra/modules`: Terraform 共通モジュール
 - `scripts/connectivity`: Bedrock 疎通テスト
 - `scripts/rag`: ベクトル索引作成 + RAG 実行
+  - `scripts/rag/rag_vector_cli.py`: CLIエントリーポイント
+  - `scripts/rag/rag_api_server.py`: APIエントリーポイント（互換エクスポート）
+  - `scripts/rag/api_bootstrap.py`: API起動時の引数/コンテキスト構築
+  - `scripts/rag/api_transport.py`: HTTP transport/routing
+  - `scripts/rag/api_endpoints.py`: endpoint業務ロジック
+  - `scripts/rag/core/bootstrap.py`: CLI/API共通bootstrap
 - `scripts/audit`: Linux 監査情報収集
 
 <a id="initial-setup"></a>
@@ -449,6 +456,12 @@ python3 scripts/rag/rag_vector_cli.py \
 ## RAG API実行
 CLIと同じ `core` を使うHTTP受け口として、`/search` と `/qa` を提供します。  
 連携用途として、OpenAI互換の最小I/F（`/v1/models`, `/v1/chat/completions`）と Dify向けI/F（`/integrations/dify/qa`）も提供します。
+
+実装モジュール（#20反映後）:
+- `scripts/rag/rag_api_server.py`: 互換エントリーポイント（既存 import / 起動パスを維持）
+- `scripts/rag/api_bootstrap.py`: 引数処理と `AppContext` 構築
+- `scripts/rag/api_transport.py`: HTTP transport / routing / エンドポイント振り分け
+- `scripts/rag/api_endpoints.py`: request解釈・検索・QA実行などの業務ロジック
 
 起動:
 ```bash
