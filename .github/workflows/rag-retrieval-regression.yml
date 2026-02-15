@@ -1,0 +1,42 @@
+name: rag-retrieval-regression
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  retrieval-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Unit Tests
+        run: |
+          python -m unittest discover -s scripts/rag/tests -p 'test_*.py'
+
+      - name: Run Retrieval Fixture Gate
+        run: |
+          python scripts/rag/eval/eval_retrieval.py \
+            --chunks scripts/rag/eval/fixtures/chunks_fixture.jsonl \
+            --golden scripts/rag/eval/fixtures/golden_fixture.jsonl \
+            --top-k 5 \
+            --min-recall 0.95 \
+            --min-mrr 0.95 \
+            --min-ndcg 0.95 \
+            --max-duplicate-rate 0.05
+
+      - name: Syntax Check
+        run: |
+          python -m py_compile \
+            scripts/rag/build_chunks_from_pdfs.py \
+            scripts/rag/build_vector_index.py \
+            scripts/rag/rag_vector_cli.py \
+            scripts/rag/eval/eval_retrieval.py

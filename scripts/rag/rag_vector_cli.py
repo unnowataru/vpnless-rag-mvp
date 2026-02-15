@@ -8,16 +8,34 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from core.audit import current_times as core_current_times
+from core.audit import make_request_id as core_make_request_id
+from core.audit import system_prompt_sha256 as core_system_prompt_sha256
+from core.audit import write_audit_log as core_write_audit_log
+from core.bedrock_client import run_aws_cli
+from core.local_retriever import LocalVectorRetriever
+from core.prompt_builder import build_evidence as core_build_evidence
+from core.prompt_builder import build_runtime_evidence_block as core_build_runtime_evidence_block
+from core.retriever_external import ExternalRetriever
+from core.retriever_external import ExternalRetrieverConfig
+from core.retriever_fallback import FallbackRetriever
+from core.scope_resolver import infer_doc_id_scope_filters
+from core.retriever_vast import VastRetriever
+from core.retriever_vast import VastRetrieverConfig
+from core.retriever_contract import RetrievalHit
+from core.retriever_contract import build_hit_from_row
+from core.retriever_contract import serialize_hit
+from core.retriever_contract import validate_filters
 
 try:
     import faiss  # type: ignore
@@ -81,6 +99,7 @@ class RuntimeConfig:
     answer_profile_to_model: dict[str, str]
     temporal_rules: tuple[TemporalMilestoneRule, ...]
     default_system_prompt_file: Path | None
+    default_retrieval_filters: dict[str, Any]
 
 
 def sanitize(text: str) -> str:
@@ -322,11 +341,23 @@ def load_runtime_config(path: str) -> RuntimeConfig:
             candidate = (config_path.parent / candidate).resolve()
         default_prompt_path = candidate
 
+    default_retrieval_filters_raw = raw.get("default_retrieval_filters")
+    if default_retrieval_filters_raw is None:
+        default_retrieval_filters: dict[str, Any] = {}
+    else:
+        if not isinstance(default_retrieval_filters_raw, dict):
+            raise SystemExit(f"default_retrieval_filters must be an object: {config_path}")
+        try:
+            default_retrieval_filters = validate_filters(default_retrieval_filters_raw)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid default_retrieval_filters in runtime config: {exc}") from exc
+
     return RuntimeConfig(
         answer_profiles=tuple(answer_profiles),
         answer_profile_to_model=answer_profile_to_model,
         temporal_rules=tuple(temporal_rules),
         default_system_prompt_file=default_prompt_path,
+        default_retrieval_filters=default_retrieval_filters,
     )
 
 
@@ -367,6 +398,47 @@ def load_metadata(index_dir: Path) -> list[dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def parse_filters_json(raw: str | None) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"--filters-json must be valid JSON: {exc}") from exc
+    try:
+        return validate_filters(loaded)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid --filters-json: {exc}") from exc
+
+
+def resolve_retrieval_filters(
+    question: str,
+    explicit_filters: dict[str, Any],
+    runtime_default_filters: dict[str, Any],
+    metadata: list[dict[str, Any]],
+    auto_scope_max_docs: int,
+    allow_unscoped: bool,
+) -> tuple[dict[str, Any], str]:
+    if explicit_filters:
+        return explicit_filters, "cli_filters_json"
+
+    auto_scope = infer_doc_id_scope_filters(question, metadata, max_docs=auto_scope_max_docs)
+    if auto_scope:
+        return auto_scope, "auto_doc_id_scope"
+
+    if runtime_default_filters:
+        return runtime_default_filters, "runtime_default_retrieval_filters"
+
+    if allow_unscoped:
+        return {}, "allow_unscoped"
+
+    raise RuntimeError(
+        "Failed to resolve retrieval scope. "
+        "Provide --filters-json, configure default_retrieval_filters in runtime config, "
+        "or use --allow-unscoped."
+    )
 
 
 def embed_query(model: SentenceTransformer, question: str, query_prefix: str) -> np.ndarray:
@@ -415,6 +487,127 @@ def collect_hits(results_scores: np.ndarray, results_ids: np.ndarray) -> list[di
     return hits
 
 
+def _as_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, list):
+        return tuple(str(v) for v in value)
+    if isinstance(value, tuple):
+        return tuple(str(v) for v in value)
+    if value is None:
+        return ()
+    return (str(value),)
+
+
+def _matches_filter_value(actual: Any, expected: Any) -> bool:
+    actual_values = {v.strip() for v in _as_tuple(actual) if v.strip()}
+    if isinstance(expected, (list, tuple)):
+        expected_values = {str(v).strip() for v in expected if str(v).strip()}
+        return bool(actual_values & expected_values)
+    text = str(expected).strip()
+    if not text:
+        return True
+    return text in actual_values
+
+
+def _matches_updated_at(actual: Any, expected: Any) -> bool:
+    actual_text = str(actual or "").strip()
+    if not actual_text:
+        return False
+    if isinstance(expected, dict):
+        gte = str(expected.get("gte", "")).strip()
+        lte = str(expected.get("lte", "")).strip()
+        if gte and actual_text < gte:
+            return False
+        if lte and actual_text > lte:
+            return False
+        return True
+    return _matches_filter_value(actual_text, expected)
+
+
+def row_matches_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:
+    if not filters:
+        return True
+    for key, expected in filters.items():
+        if key == "doc_id":
+            actual = row.get("doc_id") or row.get("doc")
+        elif key == "label":
+            labels = row.get("labels")
+            actual = labels if labels else row.get("label")
+        elif key == "updated_at":
+            if not _matches_updated_at(row.get("updated_at"), expected):
+                return False
+            continue
+        else:
+            actual = row.get(key)
+        if not _matches_filter_value(actual, expected):
+            return False
+    return True
+
+
+def apply_filters_to_hits(
+    hits: list[dict[str, Any]],
+    metadata: list[dict[str, Any]],
+    filters: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not filters:
+        return hits
+    filtered: list[dict[str, Any]] = []
+    for hit in hits:
+        idx = int(hit["idx"])
+        if idx < 0 or idx >= len(metadata):
+            continue
+        if row_matches_filters(metadata[idx], filters):
+            filtered.append(hit)
+    return filtered
+
+
+def build_retrieval_stats(
+    total_hits_before_filter: int,
+    total_hits_after_filter: int,
+    total_hits_after_rerank: int,
+) -> dict[str, Any]:
+    pass_rate = (
+        float(total_hits_after_filter) / float(total_hits_before_filter)
+        if total_hits_before_filter > 0
+        else 0.0
+    )
+    return {
+        "hits_before_filter": total_hits_before_filter,
+        "hits_after_filter": total_hits_after_filter,
+        "hits_after_rerank": total_hits_after_rerank,
+        "filter_pass_rate": pass_rate,
+        "zero_hit": total_hits_after_filter == 0,
+    }
+
+
+def to_contract_hits(
+    hits: list[dict[str, Any]],
+    metadata: list[dict[str, Any]],
+    snippet_chars: int,
+) -> list[RetrievalHit]:
+    contract_hits: list[RetrievalHit] = []
+    for hit in hits:
+        idx = int(hit["idx"])
+        if idx < 0 or idx >= len(metadata):
+            continue
+        row = metadata[idx]
+        vector_score = hit.get("vector_score")
+        rerank_score = hit.get("rerank_score")
+        effective_score = rerank_score if rerank_score is not None else vector_score
+        if effective_score is None:
+            effective_score = 0.0
+        contract_hits.append(
+            build_hit_from_row(
+                row=row,
+                score=float(effective_score),
+                snippet_chars=snippet_chars,
+                fallback_index=idx,
+                vector_score=float(vector_score) if vector_score is not None else None,
+                rerank_score=float(rerank_score) if rerank_score is not None else None,
+            )
+        )
+    return contract_hits
+
+
 def to_rerank_model_arn(model_id_or_arn: str, region: str) -> str:
     if model_id_or_arn.startswith("arn:"):
         return model_id_or_arn
@@ -423,13 +616,16 @@ def to_rerank_model_arn(model_id_or_arn: str, region: str) -> str:
 
 def rerank_hits(
     question: str,
-    hits: list[dict[str, Any]],
+    hits: list[RetrievalHit],
     metadata: list[dict[str, Any]],
     region: str,
     profile: str,
     rerank_model: str,
     rerank_topn: int,
-) -> list[dict[str, Any]]:
+    timeout_sec: int,
+    retries: int,
+    retry_backoff_sec: float,
+) -> list[RetrievalHit]:
     if not hits:
         return hits
 
@@ -438,7 +634,11 @@ def rerank_hits(
 
     sources: list[dict[str, Any]] = []
     for hit in hits:
-        row = metadata[hit["idx"]]
+        idx = hit.metadata_index
+        if idx is None or idx < 0 or idx >= len(metadata):
+            row = {"text": hit.text_snippet}
+        else:
+            row = metadata[idx]
         text = sanitize(str(row.get("text", "")).replace("\n", " ")).strip()
         if not text:
             text = "(empty)"
@@ -483,16 +683,19 @@ def rerank_hits(
             "--output",
             "json",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "AWS rerank call failed.")
+        result = run_aws_cli(
+            cmd,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            retry_backoff_sec=retry_backoff_sec,
+        )
 
         body = json.loads(result.stdout) if result.stdout.strip() else {}
         rerank_results = body.get("results", [])
         if not rerank_results:
             return hits
 
-        ordered: list[dict[str, Any]] = []
+        ordered: list[RetrievalHit] = []
         seen_source_indexes: set[int] = set()
         for item in rerank_results:
             source_index = item.get("index")
@@ -500,8 +703,12 @@ def rerank_hits(
                 continue
             if source_index < 0 or source_index >= len(hits):
                 continue
-            merged = dict(hits[source_index])
-            merged["rerank_score"] = float(item.get("relevanceScore", 0.0))
+            relevance = float(item.get("relevanceScore", 0.0))
+            merged = replace(
+                hits[source_index],
+                score=relevance,
+                rerank_score=relevance,
+            )
             ordered.append(merged)
             seen_source_indexes.add(source_index)
 
@@ -517,37 +724,34 @@ def rerank_hits(
 
 
 def build_evidence(
-    hits: list[dict[str, Any]],
-    metadata: list[dict[str, Any]],
+    hits: list[RetrievalHit],
     max_context_chars: int,
     start_rank: int = 1,
 ) -> tuple[str, list[dict[str, Any]]]:
     parts: list[str] = []
     entries: list[dict[str, Any]] = []
     for rank, hit in enumerate(hits, start=start_rank):
-        idx = hit["idx"]
-        if idx < 0 or idx >= len(metadata):
-            continue
-        row = metadata[idx]
-        snippet = sanitize(str(row.get("text", "")).replace("\n", " "))[:1200]
-        score_str = f"vector={hit['vector_score']:.5f}"
-        if "rerank_score" in hit:
-            score_str += f" rerank={hit['rerank_score']:.5f}"
+        doc = hit.doc_meta.get("doc")
+        page = hit.doc_meta.get("page")
+        chunk = hit.doc_meta.get("chunk")
+        section = "/".join(hit.section_path) if hit.section_path else "-"
+        labels = ",".join(hit.labels) if hit.labels else "-"
+
+        score_str = f"score={hit.score:.5f}"
+        if hit.vector_score is not None:
+            score_str += f" vector={hit.vector_score:.5f}"
+        if hit.rerank_score is not None:
+            score_str += f" rerank={hit.rerank_score:.5f}"
         parts.append(
-            f"[{rank}] score({score_str}) doc={row.get('doc')} "
-            f"page={row.get('page')} chunk={row.get('chunk')}\n{snippet}\n"
+            f"[{rank}] score({score_str}) doc={doc} "
+            f"page={page} chunk={chunk} chunk_id={hit.chunk_id} "
+            f"section={section} labels={labels}\n"
+            f"{sanitize(hit.text_snippet)}\n"
         )
-        entries.append(
-            {
-                "rank": rank,
-                "source_type": "vector",
-                "doc": row.get("doc"),
-                "page": row.get("page"),
-                "chunk": row.get("chunk"),
-                "vector_score": hit.get("vector_score"),
-                "rerank_score": hit.get("rerank_score"),
-            }
-        )
+        entry = serialize_hit(hit)
+        entry["rank"] = rank
+        entry["source_type"] = "vector"
+        entries.append(entry)
     return ("\n".join(parts))[:max_context_chars], entries
 
 
@@ -593,6 +797,9 @@ def call_bedrock(
     region: str,
     profile: str,
     model_id: str,
+    timeout_sec: int,
+    retries: int,
+    retry_backoff_sec: float,
 ) -> str:
     prompt = f"{system_prompt.rstrip()}\n\nQuestion:\n{question}\n\nEvidence:\n{evidence}"
 
@@ -624,9 +831,12 @@ def call_bedrock(
             "--output",
             "text",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "AWS CLI call failed.")
+        result = run_aws_cli(
+            cmd,
+            timeout_sec=timeout_sec,
+            retries=retries,
+            retry_backoff_sec=retry_backoff_sec,
+        )
         return result.stdout.strip()
     finally:
         try:
@@ -691,42 +901,92 @@ def run_single_query(
     system_prompt: str,
     temporal_rules: tuple[TemporalMilestoneRule, ...],
     answer_profile_to_model: dict[str, str],
+    local_retriever: LocalVectorRetriever,
+    external_fallback_retriever: FallbackRetriever | None,
 ) -> None:
-    request_id = make_request_id(args.request_id)
-    now_utc, now_jst = current_times()
+    request_id = core_make_request_id(args.request_id)
+    now_utc, now_jst = core_current_times()
     rule_answer = build_rule_based_answer(
         question=question,
         metadata=metadata,
         today=now_jst.date(),
         temporal_rules=temporal_rules,
     )
+    try:
+        applied_filters, scope_source = resolve_retrieval_filters(
+            question=question,
+            explicit_filters=args.explicit_retrieval_filters,
+            runtime_default_filters=args.runtime_default_retrieval_filters,
+            metadata=metadata,
+            auto_scope_max_docs=args.auto_scope_max_docs,
+            allow_unscoped=args.allow_unscoped,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        f"[INFO] retrieval_scope_source={scope_source} filters="
+        f"{json.dumps(applied_filters, ensure_ascii=False)}",
+        file=sys.stderr,
+    )
 
-    qvec = embed_query(model, question, query_prefix)
-
-    scores, ids = topk_search(qvec, args.topk, Path(args.index_dir), manifest["backend"])
-    hits = collect_hits(scores, ids)
+    if external_fallback_retriever is None:
+        diagnostics = local_retriever.search_with_diagnostics(
+            query_text=question,
+            top_k=args.topk,
+            filters=applied_filters,
+        )
+        contract_hits = diagnostics.hits
+        retrieval_stats = dict(diagnostics.stats)
+        retrieval_stats["retriever_backend_used"] = "local"
+        retrieval_stats["fallback_triggered"] = False
+        retrieval_stats["fallback_error"] = None
+    else:
+        fallback_result = external_fallback_retriever.search_with_fallback(
+            query_text=question,
+            top_k=args.topk,
+            filters=applied_filters,
+        )
+        contract_hits = fallback_result.hits
+        retrieval_stats = {
+            "hits_before_filter": len(contract_hits),
+            "hits_after_filter": len(contract_hits),
+            "hits_after_rerank": len(contract_hits),
+            "filter_pass_rate": 1.0 if contract_hits else 0.0,
+            "zero_hit": len(contract_hits) == 0,
+            "retriever_backend_used": fallback_result.backend_used,
+            "fallback_triggered": fallback_result.fallback_triggered,
+            "fallback_error": fallback_result.error,
+        }
     if args.rerank:
         try:
-            hits = rerank_hits(
+            contract_hits = rerank_hits(
                 question=question,
-                hits=hits,
+                hits=contract_hits,
                 metadata=metadata,
                 region=args.region,
                 profile=args.profile,
                 rerank_model=args.rerank_model,
                 rerank_topn=args.rerank_topn,
+                timeout_sec=args.aws_timeout_sec,
+                retries=args.aws_retries,
+                retry_backoff_sec=args.aws_retry_backoff_sec,
             )
         except RuntimeError as exc:
             print(f"[WARN] Rerank failed. Falling back to vector-only ranking: {exc}", file=sys.stderr)
+    retrieval_stats["hits_after_rerank"] = len(contract_hits)
+    print(
+        "[INFO] retrieval_stats="
+        + json.dumps(retrieval_stats, ensure_ascii=False),
+        file=sys.stderr,
+    )
     vector_start_rank = 3 if rule_answer else 2
-    vector_evidence, vector_entries = build_evidence(
-        hits,
-        metadata,
+    vector_evidence, vector_entries = core_build_evidence(
+        contract_hits,
         args.max_context_chars,
         start_rank=vector_start_rank,
     )
 
-    runtime_block, runtime_entry = build_runtime_evidence_block(
+    runtime_block, runtime_entry = core_build_runtime_evidence_block(
         rank=1,
         request_id=request_id,
         now_utc=now_utc,
@@ -757,7 +1017,7 @@ def run_single_query(
     print("=== TOPK EVIDENCE ===")
     print(evidence if evidence else "(no hits)")
     print("=== BEDROCK ANSWER ===")
-    has_substantive_evidence = bool(vector_entries) or bool(rule_answer)
+    has_substantive_evidence = bool(contract_hits) or bool(rule_answer)
     if not evidence or not has_substantive_evidence:
         answer = "Evidence is insufficient."
         print(answer)
@@ -778,15 +1038,18 @@ def run_single_query(
                 "status": "insufficient",
                 "error": None,
                 "system_prompt_file": args.system_prompt_file,
-                "system_prompt_sha256": system_prompt_sha256(system_prompt),
+                "system_prompt_sha256": core_system_prompt_sha256(system_prompt),
                 "evidence_entries": evidence_entries,
                 "index_dir": str(args.index_dir),
                 "topk": args.topk,
                 "rerank": args.rerank,
                 "rerank_model": args.rerank_model,
                 "rerank_topn": args.rerank_topn,
+                "filters": applied_filters,
+                "scope_source": scope_source,
+                "retrieval_stats": retrieval_stats,
             }
-            audit_path = write_audit_log(args.audit_log_dir, request_id, payload)
+            audit_path = core_write_audit_log(args.audit_log_dir, request_id, payload)
             print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
         return
 
@@ -806,6 +1069,9 @@ def run_single_query(
             region=args.region,
             profile=args.profile,
             model_id=bedrock_model,
+            timeout_sec=args.aws_timeout_sec,
+            retries=args.aws_retries,
+            retry_backoff_sec=args.aws_retry_backoff_sec,
         )
     except RuntimeError as exc:
         error_message = str(exc)
@@ -822,17 +1088,24 @@ def run_single_query(
                 "status": "failed",
                 "error": error_message,
                 "system_prompt_file": args.system_prompt_file,
-                "system_prompt_sha256": system_prompt_sha256(system_prompt),
+                "system_prompt_sha256": core_system_prompt_sha256(system_prompt),
                 "evidence_entries": evidence_entries,
                 "index_dir": str(args.index_dir),
                 "topk": args.topk,
                 "rerank": args.rerank,
                 "rerank_model": args.rerank_model,
                 "rerank_topn": args.rerank_topn,
+                "filters": applied_filters,
+                "scope_source": scope_source,
+                "retrieval_stats": retrieval_stats,
             }
-            audit_path = write_audit_log(args.audit_log_dir, request_id, payload)
+            audit_path = core_write_audit_log(args.audit_log_dir, request_id, payload)
             print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
-        raise
+        if args.fail_on_generation_error:
+            raise
+        answer = "Evidence is insufficient."
+        print(answer)
+        return
 
     print(answer)
     if args.audit_log_dir:
@@ -848,15 +1121,18 @@ def run_single_query(
             "status": "success",
             "error": error_message,
             "system_prompt_file": args.system_prompt_file,
-            "system_prompt_sha256": system_prompt_sha256(system_prompt),
+            "system_prompt_sha256": core_system_prompt_sha256(system_prompt),
             "evidence_entries": evidence_entries,
             "index_dir": str(args.index_dir),
             "topk": args.topk,
             "rerank": args.rerank,
             "rerank_model": args.rerank_model,
             "rerank_topn": args.rerank_topn,
+            "filters": applied_filters,
+            "scope_source": scope_source,
+            "retrieval_stats": retrieval_stats,
         }
-        audit_path = write_audit_log(args.audit_log_dir, request_id, payload)
+        audit_path = core_write_audit_log(args.audit_log_dir, request_id, payload)
         print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
 
 
@@ -878,9 +1154,71 @@ def parse_args() -> argparse.Namespace:
         help="How many reranked results to request. 0 means all vector hits.",
     )
     parser.add_argument("--max-context-chars", type=int, default=12000)
+    parser.add_argument(
+        "--snippet-max-chars",
+        type=int,
+        default=1200,
+        help="Max chars per hit snippet sent to LLM (separate from full chunk storage).",
+    )
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
+    parser.add_argument(
+        "--retriever-backend",
+        choices=["local", "vast", "external"],
+        default="local",
+        help="Retriever backend contract target. vast/external uses local fallback by default.",
+    )
+    parser.add_argument(
+        "--vast-endpoint",
+        default="",
+        help="VAST endpoint (for retriever-backend=vast).",
+    )
+    parser.add_argument(
+        "--vast-collection",
+        default="default",
+        help="VAST collection/table identifier (for retriever-backend=vast).",
+    )
+    parser.add_argument(
+        "--external-endpoint",
+        default="",
+        help="External retriever endpoint (for retriever-backend=external).",
+    )
+    parser.add_argument(
+        "--external-provider",
+        default="netapp",
+        help="External retriever provider label.",
+    )
+    parser.add_argument(
+        "--local-fallback-on-retriever-error",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fallback to local retriever when non-local backend fails.",
+    )
+    parser.add_argument(
+        "--aws-timeout-sec",
+        type=int,
+        default=45,
+        help="Timeout seconds for AWS CLI calls (rerank/converse).",
+    )
+    parser.add_argument(
+        "--aws-retries",
+        type=int,
+        default=1,
+        help="Retry count for AWS CLI calls after first attempt.",
+    )
+    parser.add_argument(
+        "--aws-retry-backoff-sec",
+        type=float,
+        default=1.0,
+        help="Base backoff seconds for AWS CLI retries.",
+    )
+    parser.add_argument(
+        "--fail-on-generation-error",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If enabled, generation errors raise non-zero exit instead of fallback answer.",
+    )
     parser.add_argument(
         "--answer-profile",
         default=None,
@@ -907,6 +1245,26 @@ def parse_args() -> argparse.Namespace:
         help="Optional request ID for audit tracing. If omitted, auto-generated.",
     )
     parser.add_argument(
+        "--filters-json",
+        default=None,
+        help=(
+            "Optional retrieval filters JSON. Allowed keys: "
+            "doc_id,label,updated_at,dept,confidentiality,customer,product,doc_type,retention."
+        ),
+    )
+    parser.add_argument(
+        "--auto-scope-max-docs",
+        type=int,
+        default=6,
+        help="Max doc_id candidates for auto scope inference from question text.",
+    )
+    parser.add_argument(
+        "--allow-unscoped",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Allow empty retrieval scope when auto/default scope cannot be resolved.",
+    )
+    parser.add_argument(
         "--interactive",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -920,6 +1278,17 @@ def main() -> None:
     args = parse_args()
     if args.topk <= 0:
         raise SystemExit("--topk must be greater than 0.")
+    if args.snippet_max_chars <= 0:
+        raise SystemExit("--snippet-max-chars must be greater than 0.")
+    if args.auto_scope_max_docs <= 0:
+        raise SystemExit("--auto-scope-max-docs must be greater than 0.")
+    if args.aws_timeout_sec <= 0:
+        raise SystemExit("--aws-timeout-sec must be greater than 0.")
+    if args.aws_retries < 0:
+        raise SystemExit("--aws-retries must be 0 or greater.")
+    if args.aws_retry_backoff_sec <= 0:
+        raise SystemExit("--aws-retry-backoff-sec must be greater than 0.")
+    args.explicit_retrieval_filters = parse_filters_json(args.filters_json)
 
     index_dir = Path(args.index_dir)
 
@@ -928,9 +1297,63 @@ def main() -> None:
     model_name = manifest["embedding_model"]
     query_prefix = manifest.get("query_prefix", "")
     runtime_config = load_runtime_config(args.runtime_config_file)
+    args.runtime_default_retrieval_filters = runtime_config.default_retrieval_filters
 
     model = SentenceTransformer(model_name)
     system_prompt = load_system_prompt(args.system_prompt_file, runtime_config.default_system_prompt_file)
+    local_retriever = LocalVectorRetriever(
+        index_dir=index_dir,
+        backend=manifest["backend"],
+        metadata=metadata,
+        model=model,
+        query_prefix=query_prefix,
+        snippet_chars=args.snippet_max_chars,
+    )
+    external_fallback_retriever: FallbackRetriever | None = None
+    if args.retriever_backend == "vast":
+        primary = VastRetriever(
+            VastRetrieverConfig(
+                endpoint=args.vast_endpoint,
+                collection=args.vast_collection,
+                timeout_sec=args.aws_timeout_sec,
+            )
+        )
+        if args.local_fallback_on_retriever_error:
+            external_fallback_retriever = FallbackRetriever(
+                primary_name="vast",
+                primary=primary,
+                fallback_name="local",
+                fallback=local_retriever,
+            )
+        else:
+            external_fallback_retriever = FallbackRetriever(
+                primary_name="vast",
+                primary=primary,
+                fallback_name="vast",
+                fallback=primary,
+            )
+    elif args.retriever_backend == "external":
+        primary = ExternalRetriever(
+            ExternalRetrieverConfig(
+                endpoint=args.external_endpoint,
+                provider=args.external_provider,
+                timeout_sec=args.aws_timeout_sec,
+            )
+        )
+        if args.local_fallback_on_retriever_error:
+            external_fallback_retriever = FallbackRetriever(
+                primary_name=args.external_provider,
+                primary=primary,
+                fallback_name="local",
+                fallback=local_retriever,
+            )
+        else:
+            external_fallback_retriever = FallbackRetriever(
+                primary_name=args.external_provider,
+                primary=primary,
+                fallback_name=args.external_provider,
+                fallback=primary,
+            )
 
     configured_default = select_default_answer_profile(runtime_config.answer_profiles)
     selected_profile = args.answer_profile or configured_default
@@ -973,6 +1396,8 @@ def main() -> None:
                 system_prompt=system_prompt,
                 temporal_rules=runtime_config.temporal_rules,
                 answer_profile_to_model=runtime_config.answer_profile_to_model,
+                local_retriever=local_retriever,
+                external_fallback_retriever=external_fallback_retriever,
             )
             print()
         return
@@ -991,6 +1416,8 @@ def main() -> None:
         system_prompt=system_prompt,
         temporal_rules=runtime_config.temporal_rules,
         answer_profile_to_model=runtime_config.answer_profile_to_model,
+        local_retriever=local_retriever,
+        external_fallback_retriever=external_fallback_retriever,
     )
 
 

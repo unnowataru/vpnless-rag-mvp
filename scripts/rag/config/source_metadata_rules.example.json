@@ -1,0 +1,30 @@
+{
+  "rules": [
+    {
+      "pattern": "FAQ|faq",
+      "fields": {
+        "labels": ["faq"],
+        "doc_type": "faq"
+      }
+    },
+    {
+      "pattern": "出張|旅費|交通費",
+      "fields": {
+        "labels": ["travel", "policy"]
+      }
+    },
+    {
+      "pattern": "休暇|休業",
+      "fields": {
+        "labels": ["leave", "policy"]
+      }
+    },
+    {
+      "pattern": ".*",
+      "fields": {
+        "dept": "hr",
+        "confidentiality": "internal"
+      }
+    }
+  ]
+}

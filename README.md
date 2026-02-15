@@ -21,6 +21,8 @@
 - [Terraform（Linux から実行）](#terraform)
 - [Bedrock 疎通テスト（Linux）](#bedrock-connectivity)
 - [ベクトルRAG実行](#vector-rag)
+- [品質評価と回帰テスト](#quality-regression)
+- [ADR（設計判断）](#adr)
 - [Linux監査収集](#linux-audit)
 - [トラブル時にまず確認する項目](#troubleshooting)
 - [秘密情報と成果物](#secrets-and-artifacts)
@@ -246,6 +248,12 @@ bash scripts/connectivity/bedrock_converse.sh
 - ベクトル上位候補を取得し、必要に応じて Bedrock Rerank で並び替え
 - Bedrock Converse で最終回答を生成
 
+Retriever Contract（固定I/F）:
+- `search(query_text, top_k, filters) -> hits[]`
+- `filters` の許可キー: `doc_id`, `label`, `updated_at`, `dept`, `confidentiality`, `customer`, `product`, `doc_type`, `retention`
+- `hit` の標準項目: `chunk_id`, `score`, `text_snippet`, `doc_meta`, `section_path`, `labels`
+- 既定では `filters` を必須運用（質問文から `doc_id` スコープを自動推定。解決不能時は fail-closed）
+
 1. 依存インストール
 ```bash
 source /home/user/vpnless-rag-venv/bin/activate
@@ -267,7 +275,9 @@ mkdir -p /home/user/dev/vpnless-rag-mvp/rag_data/index
 ```bash
 python3 scripts/rag/build_chunks_from_pdfs.py \
   --pdf-dir /home/user/dev/vpnless-rag-mvp/rag_data/pdfs \
-  --out /home/user/dev/vpnless-rag-mvp/rag_data/index/chunks.jsonl
+  --out /home/user/dev/vpnless-rag-mvp/rag_data/index/chunks.jsonl \
+  --metadata-rules-file /home/user/dev/vpnless-rag-mvp/scripts/rag/config/source_metadata_rules.example.json \
+  --default-metadata-json '{"dept":"hr","confidentiality":"internal"}'
 ```
 
 `build_chunks_from_pdfs.py` の主要既定値:
@@ -275,6 +285,13 @@ python3 scripts/rag/build_chunks_from_pdfs.py \
 - `--chunk-size 900`
 - `--chunk-overlap 150`
 - `--min-chars 80`
+- `--updated-at-source mtime`（既定。PDF更新時刻から `updated_at` を補完）
+
+メタデータ付与:
+- `doc_id` は `pdf-dir` からの相対パスを自動設定（重複しにくいID）
+- `labels` はファイル名ヒューリスティクス（`FAQ`/`規程`/`旅費` など）と rules の両方で補完
+- `dept` は rules > default > ディレクトリ名推定 の順で設定
+- `scripts/rag/config/source_metadata_rules.example.json` をコピーして運用用ルールを作成可能
 
 注記:
 - OCR は行っていないため、画像だけの PDF は `No text chunks were extracted` になります。
@@ -313,7 +330,7 @@ python3 scripts/rag/rag_vector_cli.py \
 ```
 
 `--interactive` 時の挙動:
-- 起動時に `cost/high/super-high` の回答モード選択を質問される（Enter で既定値 `cost`）。
+- 起動時に `cost/high` の回答モード選択を質問される（Enter で既定値 `cost`）。
 - `Q>` で質問を連続入力できる。
 - `exit` または `quit` で終了する。
 - `--bedrock-model` を指定した場合は、固定モデルを使うためモード選択質問はスキップされる。
@@ -331,16 +348,7 @@ python3 scripts/rag/rag_vector_cli.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
   --answer-profile high \
   "質問文"
-
-# Super High Cost（最優先で高精度。必要に応じてモデルIDを環境変数で上書き）
-RAG_SUPER_HIGH_MODEL_ID=qwen.qwen3-vl-235b-a22b \
-python3 scripts/rag/rag_vector_cli.py \
-  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
-  --answer-profile super-high \
-  "質問文"
 ```
-注記:
-- `RAG_SUPER_HIGH_MODEL_ID` に別モデルを指定する場合は、IAM ポリシーの `bedrock_allowed_model_ids` に同モデルを追加してください（未許可だと AccessDenied になります）。
 
 システムプロンプト差し替え例（汎用場合分け）:
 ```bash
@@ -364,6 +372,8 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
 - `--rerank-model amazon.rerank-v1:0`
 - `--rerank-topn 0`（0 はベクトル候補を全件 rerank）
+- `--retriever-backend local|vast|external`（既定: `local`）
+- `--local-fallback-on-retriever-error`（既定: 有効）
 - `--runtime-config-file scripts/rag/config/runtime_config.json`（回答プロファイル/時間計算ルール/既定プロンプトを定義）
 - `--answer-profile <key>`（未指定時は `runtime_config.json` の既定プロファイル）
 - `--bedrock-model`（明示指定時は `--answer-profile` より優先）
@@ -372,18 +382,61 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--request-id`（監査トレース用の任意ID）
 - `--interactive`（連続対話モード）
 - `--max-context-chars 12000`
+- `--snippet-max-chars 1200`（LLMへ渡す hit ごとの snippet 上限）
 - `--max-tokens 512`
+- `--aws-timeout-sec 45`
+- `--aws-retries 1`
+- `--aws-retry-backoff-sec 1.0`
+- `--fail-on-generation-error`（既定: 無効。生成失敗時は非ゼロ終了せず `Evidence is insufficient.` を返す）
 - `--region ap-northeast-1`
 - `--profile rag`
+- `--filters-json`（metadata filter。例: `'{"dept":"hr","label":["policy"]}'`）
+- `--auto-scope-max-docs 6`（質問文から推定した `doc_id` スコープ上限）
+- `--allow-unscoped`（スコープ未解決でも全体検索を許可。既定は無効）
 
 挙動メモ:
 - `Rerank` は候補の並び替えです。現実装では rerank で選ばれなかった候補も末尾に残します。
+- 検索時は `retrieval_scope_source` と `filters` をstderrへ出力します（監査ログにも格納）。
+- 検索時は `retrieval_stats`（`hits_before_filter`, `hits_after_filter`, `filter_pass_rate`, `fallback_triggered` など）をstderrに出力し、監査ログにも保存します。
+- `--filters-json` 未指定時は、質問文から `doc_id` スコープを自動推定します。
+- 自動推定/既定スコープのどちらも得られない場合は fail-closed で停止します。
+- `--retriever-backend vast|external` はアダプタ枠です。現時点では未接続なので、既定では local へフォールバックして継続します。
 - `=== TOPK EVIDENCE ===` には実行時刻（UTC/JST・request_id）のランタイム根拠も自動付与されます。
 - 根拠が空の場合のみ `Evidence is insufficient.` を返します。
 - 既定のシステムプロンプトは「不足条件を推定しない」「必要なら場合分け」「回答を先に出し、必要時のみ最後に確認質問1つ」を指示します。
 - 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問では、制度ごとのルール定義に基づく日付計算を補助根拠として `=== TOPK EVIDENCE ===` に追加します。
 - 最終回答は常に `=== BEDROCK ANSWER ===` で返します（ローカル計算だけで回答を確定しません）。
 - この補助計算ルールは `scripts/rag/config/runtime_config.json` の `temporal_rules` を更新して拡張できます（コード修正不要）。
+
+<a id="quality-regression"></a>
+## 品質評価と回帰テスト
+評価スクリプト:
+```bash
+python3 scripts/rag/eval/eval_retrieval.py \
+  --chunks scripts/rag/eval/fixtures/chunks_fixture.jsonl \
+  --golden scripts/rag/eval/fixtures/golden_fixture.jsonl \
+  --top-k 5 \
+  --min-recall 0.95 \
+  --min-mrr 0.95 \
+  --min-ndcg 0.95 \
+  --max-duplicate-rate 0.05
+```
+
+CI（GitHub Actions）:
+- `.github/workflows/rag-retrieval-regression.yml`
+- 実行内容:
+  - `unittest`（`scripts/rag/tests`）
+  - retrieval fixture gate（上記 eval）
+  - 主要スクリプトの `py_compile`
+
+<a id="adr"></a>
+## ADR（設計判断）
+- `docs/adr/0001-retriever-contract-and-scope.md`  
+  Retriever Contract 固定、許可 filter キー、fail-closed スコープ運用
+- `docs/adr/0002-vast-readiness.md`  
+  VAST アダプタ + フォールバック前提の段階導入方針
+- `docs/adr/0003-netapp-readiness.md`  
+  NetApp 準備（外部 retriever アダプタ、ラベル軸 metadata/監査拡張）
 
 <a id="linux-audit"></a>
 ## Linux監査収集

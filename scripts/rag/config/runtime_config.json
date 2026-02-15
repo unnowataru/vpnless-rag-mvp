@@ -9,12 +9,6 @@
       "key": "high",
       "model_id": "google.gemma-3-27b-it",
       "description": "higher quality"
-    },
-    {
-      "key": "super-high",
-      "model_id": "qwen.qwen3-vl-235b-a22b",
-      "description": "highest quality priority",
-      "env_override": "RAG_SUPER_HIGH_MODEL_ID"
     }
   ],
   "temporal_rules": [
@@ -48,5 +42,6 @@
       "anchor_day": 1
     }
   ],
-  "default_system_prompt_file": "../prompts/default_system_prompt.txt"
+  "default_system_prompt_file": "../prompts/default_system_prompt.txt",
+  "default_retrieval_filters": {}
 }

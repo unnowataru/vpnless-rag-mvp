@@ -1,0 +1,12 @@
+{"id":"f001","question":"リフレッシュ休暇の対象年数は？","expected_doc_ids":["DOC_LEAVE_001"],"filters":{"dept":"hr","label":["leave"]}}
+{"id":"f002","question":"リフレッシュ休暇の申請方法を教えて","expected_doc_ids":["DOC_LEAVE_001"],"filters":{"dept":"hr","label":["leave"]}}
+{"id":"f003","question":"国内出張の申請フローは？","expected_doc_ids":["DOC_TRAVEL_001"],"filters":{"dept":"hr","label":["travel"]}}
+{"id":"f004","question":"海外出張の精算方法を知りたい","expected_doc_ids":["DOC_TRAVEL_002"],"filters":{"dept":"hr","label":["travel"]}}
+{"id":"f005","question":"ハイブリッドワークFAQを探したい","expected_doc_ids":["DOC_FAQ_001"],"filters":{"dept":"hr","label":["faq"]}}
+{"id":"f006","question":"給与規程の内容を確認したい","expected_doc_ids":["DOC_COMP_001"],"filters":{"dept":"hr","label":["compensation"]}}
+{"id":"f007","question":"退職金規程について教えて","expected_doc_ids":["DOC_COMP_002"],"filters":{"dept":"hr","label":["compensation"]}}
+{"id":"f008","question":"就業規則の基本事項は？","expected_doc_ids":["DOC_POLICY_001"],"filters":{"dept":"hr","label":["policy"]}}
+{"id":"f009","question":"慶弔見舞金の規程はどれ？","expected_doc_ids":["DOC_POLICY_002"],"filters":{"dept":"hr","label":["policy"]}}
+{"id":"f010","question":"安全衛生管理規程を知りたい","expected_doc_ids":["DOC_POLICY_003"],"filters":{"dept":"hr","label":["policy"]}}
+{"id":"f011","question":"社員小口貸付金制度について","expected_doc_ids":["DOC_POLICY_004"],"filters":{"dept":"hr","label":["policy"]}}
+{"id":"f012","question":"出張旅費の宿泊料上限は？","expected_doc_ids":["DOC_TRAVEL_001"],"filters":{"dept":"hr","label":["travel"]}}
