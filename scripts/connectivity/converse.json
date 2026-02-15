@@ -1,6 +1,0 @@
-{
-  "messages": [
-    { "role": "user", "content": [ { "text": "Reply with exactly: OK" } ] }
-  ],
-  "inferenceConfig": { "maxTokens": 32, "temperature": 0 }
-}

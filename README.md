@@ -298,7 +298,6 @@ mkdir -p /home/user/dev/vpnless-rag-mvp/rag_data/index
 python3 scripts/rag/build_chunks_from_pdfs.py \
   --pdf-dir /home/user/dev/vpnless-rag-mvp/rag_data/pdfs \
   --out /home/user/dev/vpnless-rag-mvp/rag_data/index/chunks.jsonl \
-  --metadata-rules-file /home/user/dev/vpnless-rag-mvp/scripts/rag/config/source_metadata_rules.example.json \
   --default-metadata-json '{"dept":"hr","confidentiality":"internal"}'
 ```
 
@@ -313,7 +312,7 @@ python3 scripts/rag/build_chunks_from_pdfs.py \
 - `doc_id` は `pdf-dir` からの相対パスを自動設定（重複しにくいID）
 - `labels` はファイル名ヒューリスティクス（`FAQ`/`規程`/`旅費` など）と rules の両方で補完
 - `dept` は rules > default > ディレクトリ名推定 の順で設定
-- `scripts/rag/config/source_metadata_rules.example.json` をコピーして運用用ルールを作成可能
+- `--metadata-rules-file` は任意（自前のJSONルールファイルを指定）
 
 注記:
 - OCR は行っていないため、画像だけの PDF は `No text chunks were extracted` になります。
@@ -382,9 +381,10 @@ python3 scripts/rag/rag_vector_cli.py \
 
 システムプロンプト差し替え例（汎用場合分け）:
 ```bash
+# 例: 任意のプロンプトファイルを作成して指定
 python3 scripts/rag/rag_vector_cli.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
-  --system-prompt-file /home/user/dev/vpnless-rag-mvp/scripts/rag/prompts/case_split_system_prompt.txt \
+  --system-prompt-file /home/user/dev/vpnless-rag-mvp/my_prompt.txt \
   "質問文"
 ```
 
@@ -501,6 +501,10 @@ CI（GitHub Actions）:
   - `unittest`（`scripts/rag/tests`）
   - retrieval fixture gate（上記 eval）
   - 主要スクリプトの `py_compile`
+
+ローカル評価データ運用（必須）:
+- 実名の文書名/ファイルパス/顧客識別子を git にコミットしない
+- `expected_doc_ids` は匿名ID（例: `DOC_POLICY_001`）を使う
 
 <a id="adr"></a>
 ## ADR（設計判断）
