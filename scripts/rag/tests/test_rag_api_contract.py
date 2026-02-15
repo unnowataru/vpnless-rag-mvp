@@ -71,6 +71,7 @@ class _DummyFallbackRetriever:
             backend_used="dummy",
             fallback_triggered=False,
             error=None,
+            error_type=None,
         )
 
 
@@ -162,6 +163,8 @@ class RagApiContractTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body.get("status"), "ok")
             self.assertEqual(body.get("service"), "rag-api")
+            self.assertIsInstance(body.get("backends"), dict)
+            self.assertIn("local", body["backends"])
         finally:
             server.shutdown()
             thread.join(timeout=5)

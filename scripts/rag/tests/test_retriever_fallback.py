@@ -55,6 +55,7 @@ class FallbackRetrieverTests(unittest.TestCase):
         self.assertEqual(result.backend_used, "local")
         self.assertEqual(len(result.hits), 1)
         self.assertEqual(result.error, "backend unavailable")
+        self.assertEqual(result.error_type, "backend_error")
 
     def test_fallback_does_not_swallow_non_backend_error(self) -> None:
         retriever = FallbackRetriever(

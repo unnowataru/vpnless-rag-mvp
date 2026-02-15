@@ -52,6 +52,10 @@ class Retriever(Protocol):
 class RetrieverBackendError(RuntimeError):
     """Errors that indicate backend retriever failure and allow fallback."""
 
+    def __init__(self, message: str, *, code: str = "backend_error") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def validate_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
     if filters is None:

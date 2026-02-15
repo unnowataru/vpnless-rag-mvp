@@ -16,6 +16,7 @@ class FallbackSearchResult:
     backend_used: str
     fallback_triggered: bool
     error: str | None
+    error_type: str | None
 
 
 class FallbackRetriever:
@@ -46,6 +47,7 @@ class FallbackRetriever:
                 backend_used=self.primary_name,
                 fallback_triggered=False,
                 error=None,
+                error_type=None,
             )
         except RetrieverBackendError as exc:  # pragma: no cover - runtime fallback path
             hits = self.fallback.search(query_text=query_text, top_k=top_k, filters=filters)
@@ -54,4 +56,5 @@ class FallbackRetriever:
                 backend_used=self.fallback_name,
                 fallback_triggered=True,
                 error=str(exc),
+                error_type=exc.code,
             )

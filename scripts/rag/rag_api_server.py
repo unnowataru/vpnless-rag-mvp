@@ -76,6 +76,9 @@ class AppContext:
     allow_unscoped_default: bool
     auto_scope_max_docs: int
     audit_log_dir: str | None
+    vast_endpoint: str = ""
+    external_endpoint: str = ""
+    local_fallback_on_retriever_error: bool = True
 
 
 def _json_error(message: str, *, status: int, details: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
@@ -184,6 +187,7 @@ def _search(
         stats["retriever_backend_used"] = "local"
         stats["fallback_triggered"] = False
         stats["fallback_error"] = None
+        stats["fallback_error_type"] = None
         return diagnostics.hits, stats
 
     retriever = ctx.vast_retriever if backend == "vast" else ctx.external_retriever
@@ -201,6 +205,7 @@ def _search(
         "retriever_backend_used": result.backend_used,
         "fallback_triggered": result.fallback_triggered,
         "fallback_error": result.error,
+        "fallback_error_type": result.error_type,
     }
     return result.hits, stats
 
@@ -212,6 +217,21 @@ def _serialize_hits(hits: list[RetrievalHit]) -> list[dict[str, Any]]:
         row["rank"] = rank
         rows.append(row)
     return rows
+
+
+def _backend_status(endpoint: str) -> dict[str, Any]:
+    configured = bool(endpoint.strip())
+    if configured:
+        return {
+            "configured": True,
+            "status": "configured",
+            "reason": None,
+        }
+    return {
+        "configured": False,
+        "status": "not_configured",
+        "reason": "missing_endpoint",
+    }
 
 
 class RagHTTPServer(ThreadingHTTPServer):
@@ -231,11 +251,20 @@ class RagRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/health":
+            ctx = self.server.context
             self._send(
                 HTTPStatus.OK,
                 {
                     "status": "ok",
                     "service": "rag-api",
+                    "backends": {
+                        "local": {"configured": True, "status": "ready", "reason": None},
+                        "vast": _backend_status(ctx.vast_endpoint),
+                        "external": _backend_status(ctx.external_endpoint),
+                    },
+                    "fallback": {
+                        "enabled": ctx.local_fallback_on_retriever_error,
+                    },
                 },
             )
             return
@@ -570,6 +599,9 @@ def main() -> None:
         allow_unscoped_default=app_config.allow_unscoped,
         auto_scope_max_docs=app_config.auto_scope_max_docs,
         audit_log_dir=args.audit_log_dir,
+        vast_endpoint=args.vast_endpoint,
+        external_endpoint=args.external_endpoint,
+        local_fallback_on_retriever_error=args.local_fallback_on_retriever_error,
     )
 
     server_port = app_config.port if app_config.port is not None else args.port

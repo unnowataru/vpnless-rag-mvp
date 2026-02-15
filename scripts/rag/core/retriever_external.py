@@ -35,7 +35,8 @@ class ExternalRetriever(Retriever):
         _ = top_k
         _ = validate_filters(filters)
         raise RetrieverBackendError(
-            f"External retriever provider '{self.config.provider}' is not configured in this environment."
+            f"External retriever provider '{self.config.provider}' is not configured in this environment.",
+            code="not_configured",
         )
 
     @staticmethod

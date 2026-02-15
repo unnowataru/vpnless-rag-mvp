@@ -36,7 +36,8 @@ class VastRetriever(Retriever):
         _ = validate_filters(filters)
         raise RetrieverBackendError(
             "VAST retriever is not configured in this environment. "
-            "Set runtime adapter implementation and credentials first."
+            "Set runtime adapter implementation and credentials first.",
+            code="not_configured",
         )
 
     @staticmethod

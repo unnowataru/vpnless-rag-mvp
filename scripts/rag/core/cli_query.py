@@ -137,6 +137,7 @@ def run_single_query(
         retrieval_stats["retriever_backend_used"] = "local"
         retrieval_stats["fallback_triggered"] = False
         retrieval_stats["fallback_error"] = None
+        retrieval_stats["fallback_error_type"] = None
     else:
         fallback_result = external_fallback_retriever.search_with_fallback(
             query_text=question,
@@ -153,6 +154,7 @@ def run_single_query(
             "retriever_backend_used": fallback_result.backend_used,
             "fallback_triggered": fallback_result.fallback_triggered,
             "fallback_error": fallback_result.error,
+            "fallback_error_type": fallback_result.error_type,
         }
     if args.rerank:
         try:
