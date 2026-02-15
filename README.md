@@ -8,9 +8,15 @@
 - オンプレ側で関連チャンク（Top-K根拠）を検索
 - `質問 + Top-K根拠` だけを Bedrock に渡して回答生成
 
-## 目次
-- [クイックスタート（すぐに試すならこちら）](#quickstart)
-- [現在地（実装ステータス）](#current-status)
+## 読む順ガイド
+- まず試す: [クイックスタート（すぐに試すならこちら）](#quickstart)
+- 実装状況を把握: [現在地（実装ステータス）](#current-status)
+- 実運用の手順: [ベクトルRAG実行](#vector-rag), [RAG API実行](#rag-api)
+- 継続開発の入口: [差分・実装計画（Issue）](#issues)
+
+<details>
+<summary>全セクション目次（展開）</summary>
+
 - [設計原則](#design-principles)
 - [MVPスコープ](#scope)
 - [インフラ観点の配置と責務](#infra-roles)
@@ -21,14 +27,13 @@
 - [AWS認証（プロファイル / アクセスキー）](#aws-auth)
 - [Terraform（Linux から実行）](#terraform)
 - [Bedrock 疎通テスト（Linux）](#bedrock-connectivity)
-- [ベクトルRAG実行](#vector-rag)
-- [RAG API実行](#rag-api)
 - [品質評価と回帰テスト](#quality-regression)
 - [ADR（設計判断）](#adr)
 - [Linux監査収集](#linux-audit)
 - [トラブル時にまず確認する項目](#troubleshooting)
 - [秘密情報と成果物](#secrets-and-artifacts)
-- [差分・実装計画（Issue）](#issues)
+
+</details>
 
 <a id="quickstart"></a>
 ## クイックスタート（すぐに試すならこちら）
@@ -397,7 +402,14 @@ python3 scripts/rag/rag_vector_cli.py \
   "質問文"
 ```
 
-`rag_vector_cli.py` の主要既定値:
+主要ポイント（通常はここだけ把握すればOK）:
+- 回答モードは `--answer-profile cost|high`（既定: `cost`）。
+- スコープは fail-closed が既定（未解決時は停止）。必要時のみ `--allow-unscoped`。
+- 外部backend（`vast|external`）は未接続時に local fallback 可能（既定: 有効）。
+
+<details>
+<summary><code>rag_vector_cli.py</code> の主要既定値・挙動メモ（展開）</summary>
+
 - `--topk 5`
 - `--rerank`（既定: 有効、無効化は `--no-rerank`）
 - `--rerank-model amazon.rerank-v1:0`
@@ -423,20 +435,15 @@ python3 scripts/rag/rag_vector_cli.py \
 - `--filters-json`（metadata filter。例: `'{"dept":"hr","label":["policy"]}'`）
 - `--auto-scope-max-docs 6`（質問文から推定した `doc_id` スコープ上限）
 - `--allow-unscoped`（スコープ未解決でも全体検索を許可。既定は無効）
+- `Rerank` は候補の並び替えで、未採用候補は末尾に残す
+- `retrieval_scope_source` / `filters` / `retrieval_stats` は stderr と監査ログに出力
+- `--filters-json` 未指定時は質問文から `doc_id` スコープを自動推定
+- 自動推定/既定スコープのどちらも得られない場合は fail-closed で停止
+- `=== TOPK EVIDENCE ===` に runtime-context（UTC/JST・request_id）を自動付与
+- 根拠が空の場合のみ `Evidence is insufficient.` を返す
+- 日付補助計算は `scripts/rag/config/runtime_config.json` の `temporal_rules` で拡張可能
 
-挙動メモ:
-- `Rerank` は候補の並び替えです。現実装では rerank で選ばれなかった候補も末尾に残します。
-- 検索時は `retrieval_scope_source` と `filters` をstderrへ出力します（監査ログにも格納）。
-- 検索時は `retrieval_stats`（`hits_before_filter`, `hits_after_filter`, `filter_pass_rate`, `fallback_triggered` など）をstderrに出力し、監査ログにも保存します。
-- `--filters-json` 未指定時は、質問文から `doc_id` スコープを自動推定します。
-- 自動推定/既定スコープのどちらも得られない場合は fail-closed で停止します。
-- `--retriever-backend vast|external` はアダプタ枠です。現時点では未接続なので、既定では local へフォールバックして継続します。
-- `=== TOPK EVIDENCE ===` には実行時刻（UTC/JST・request_id）のランタイム根拠も自動付与されます。
-- 根拠が空の場合のみ `Evidence is insufficient.` を返します。
-- 既定のシステムプロンプトは「不足条件を推定しない」「必要なら場合分け」「回答を先に出し、必要時のみ最後に確認質問1つ」を指示します。
-- 「入社日 + 次の対象時期（例: リフレッシュ休暇 / 永年勤続）」の質問では、制度ごとのルール定義に基づく日付計算を補助根拠として `=== TOPK EVIDENCE ===` に追加します。
-- 最終回答は常に `=== BEDROCK ANSWER ===` で返します（ローカル計算だけで回答を確定しません）。
-- この補助計算ルールは `scripts/rag/config/runtime_config.json` の `temporal_rules` を更新して拡張できます（コード修正不要）。
+</details>
 
 <a id="rag-api"></a>
 ## RAG API実行
@@ -505,6 +512,14 @@ curl -s -X POST http://127.0.0.1:8000/integrations/dify/qa \
   }'
 ```
 
+連携時の最小ルール:
+- まず `/health` と `/v1/models` が返ることを確認
+- OpenAI互換は `stream=false` 前提
+- 連携初期は `rerank=false` で疎通確認
+
+<details>
+<summary>API仕様詳細（主要キー / マッピング / エラー整形）</summary>
+
 主要リクエストキー:
 - `/search`: `query_text`, `top_k`, `filters`, `retriever_backend`, `allow_unscoped`, `auto_scope_max_docs`
 - `/qa`: `question`, `top_k`, `filters`, `answer_profile`, `bedrock_model`, `rerank`
@@ -512,8 +527,8 @@ curl -s -X POST http://127.0.0.1:8000/integrations/dify/qa \
 - `/integrations/dify/qa`: `query|question`, `top_k`, `filters`, `answer_profile`, `allow_unscoped`, `retriever_backend`, `rerank`
 
 連携I/Fの制約（最小互換）:
-- `/v1/chat/completions` は `stream=false` のみ対応（`stream=true` は未対応）。
-- OpenAI互換 `model` は `answer_profile` キー（`cost` / `high`）の指定を推奨。
+- `/v1/chat/completions` は `stream=false` のみ対応（`stream=true` は未対応）
+- OpenAI互換 `model` は `answer_profile` キー（`cost` / `high`）の指定を推奨
 
 マッピング仕様（固定）:
 - OpenAI `messages` の最後の `role=user` テキストを `question` にマップ
@@ -522,14 +537,15 @@ curl -s -X POST http://127.0.0.1:8000/integrations/dify/qa \
 - `top_k` / `filters` / `allow_unscoped` / `rerank` は各I/Fから `/qa` と同じ意味で渡す
 
 エラー整形ポリシー:
-- `/search`, `/qa`: `{"error":"..."}`（既存）
+- `/search`, `/qa`: `{"error":"..."}`
 - `/v1/chat/completions`: `{"error":{"message":"...","type":"..."}}`
 - `/integrations/dify/qa`: `{"code":"...","message":"..."}`
 
 CORS/timeout/retry（PoC推奨）:
 - CORS: `--cors-allow-origin "*"`（本番は明示オリジンへ限定）
-- timeout/retry: `--aws-timeout-sec`, `--aws-retries`, `--aws-retry-backoff-sec` を利用
-- 連携初期は `rerank=false` で疎通確認してから有効化
+- timeout/retry: `--aws-timeout-sec`, `--aws-retries`, `--aws-retry-backoff-sec`
+
+</details>
 
 <a id="quality-regression"></a>
 ## 品質評価と回帰テスト
@@ -602,6 +618,7 @@ bash scripts/audit/collect_linux.sh
 | `#17` https://github.com/unnowataru/vpnless-rag-mvp/issues/17 | P2 | 進行中 | OpenWebUI/Dify連携の親Issue。`#18`/`#19` を管理。 |
 | `#18` https://github.com/unnowataru/vpnless-rag-mvp/issues/18 | P2 | 進行中 | 連携I/F実装は完了。OpenWebUI/Dify本体デプロイでの実機E2E確認が残。 |
 | `#19` https://github.com/unnowataru/vpnless-rag-mvp/issues/19 | P2 | 未着手 | 連携向け最小認証とユーザー文脈監査。 |
+| `#20` https://github.com/unnowataru/vpnless-rag-mvp/issues/20 | P2 | 未着手 | 再肥大化対策（API/CLI重複削減、責務分割、既存挙動維持）。 |
 
 主要完了Issue（直近）:
 - `#8` Core分離と肥大化解消リファクタ（Closed）
@@ -610,11 +627,12 @@ bash scripts/audit/collect_linux.sh
 - `#3` `/search` API実装（Closed）
 
 次の優先順（実装継続）:
-1. `#18` OpenWebUI / Dify 本体デプロイ環境での実機E2E確認
-2. `#19` 最小認証 + ユーザー文脈（`user_id/tenant_id/session_id`）監査連携
-3. `#7` VAST/NetApp 実接続PoC（filters有無の性能検証を含む）
-4. `#5` イベント駆動トリガ/再実行制御
-5. `#6` 監査ログTTL・保持・マスク運用実装
+1. `#20` 再肥大化対策（共通化→責務分割の低リスク順）
+2. `#18` OpenWebUI / Dify 本体デプロイ環境での実機E2E確認
+3. `#19` 最小認証 + ユーザー文脈（`user_id/tenant_id/session_id`）監査連携
+4. `#7` VAST/NetApp 実接続PoC（filters有無の性能検証を含む）
+5. `#5` イベント駆動トリガ/再実行制御
+6. `#6` 監査ログTTL・保持・マスク運用実装
 
 ## License
 MIT License（`LICENSE` を参照）
