@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from .bedrock_client import run_aws_cli
+from .bedrock_client import AwsCliBedrockClient
 from .retriever_contract import RetrievalHit
 from .retriever_contract import validate_filters
 from .scope_resolver import infer_doc_id_scope_filters
@@ -417,64 +415,39 @@ def rerank_hits(
         },
         "sources": sources,
     }
+    bedrock_client = AwsCliBedrockClient(
+        region=region,
+        profile=profile,
+        timeout_sec=timeout_sec,
+        retries=retries,
+        retry_backoff_sec=retry_backoff_sec,
+    )
+    body = bedrock_client.rerank(payload=payload)
+    rerank_results = body.get("results", [])
+    if not rerank_results:
+        return hits
 
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
-        json.dump(payload, tmp, ensure_ascii=False)
-        temp_path = tmp.name
-
-    try:
-        cmd = [
-            "aws",
-            "bedrock-agent-runtime",
-            "rerank",
-            "--region",
-            region,
-            "--profile",
-            profile,
-            "--cli-input-json",
-            f"file://{temp_path}",
-            "--no-cli-pager",
-            "--output",
-            "json",
-        ]
-        result = run_aws_cli(
-            cmd,
-            timeout_sec=timeout_sec,
-            retries=retries,
-            retry_backoff_sec=retry_backoff_sec,
+    ordered: list[RetrievalHit] = []
+    seen_source_indexes: set[int] = set()
+    for item in rerank_results:
+        source_index = item.get("index")
+        if not isinstance(source_index, int):
+            continue
+        if source_index < 0 or source_index >= len(hits):
+            continue
+        relevance = float(item.get("relevanceScore", 0.0))
+        merged = replace(
+            hits[source_index],
+            score=relevance,
+            rerank_score=relevance,
         )
+        ordered.append(merged)
+        seen_source_indexes.add(source_index)
 
-        body = json.loads(result.stdout) if result.stdout.strip() else {}
-        rerank_results = body.get("results", [])
-        if not rerank_results:
-            return hits
-
-        ordered: list[RetrievalHit] = []
-        seen_source_indexes: set[int] = set()
-        for item in rerank_results:
-            source_index = item.get("index")
-            if not isinstance(source_index, int):
-                continue
-            if source_index < 0 or source_index >= len(hits):
-                continue
-            relevance = float(item.get("relevanceScore", 0.0))
-            merged = replace(
-                hits[source_index],
-                score=relevance,
-                rerank_score=relevance,
-            )
-            ordered.append(merged)
-            seen_source_indexes.add(source_index)
-
-        for source_index, hit in enumerate(hits):
-            if source_index not in seen_source_indexes:
-                ordered.append(hit)
-        return ordered
-    finally:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
+    for source_index, hit in enumerate(hits):
+        if source_index not in seen_source_indexes:
+            ordered.append(hit)
+    return ordered
 
 
 def call_bedrock(
@@ -495,42 +468,14 @@ def call_bedrock(
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
         "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0},
     }
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as tmp:
-        json.dump(payload, tmp, ensure_ascii=False)
-        temp_path = tmp.name
-
-    try:
-        cmd = [
-            "aws",
-            "bedrock-runtime",
-            "converse",
-            "--region",
-            region,
-            "--profile",
-            profile,
-            "--model-id",
-            model_id,
-            "--cli-input-json",
-            f"file://{temp_path}",
-            "--no-cli-pager",
-            "--query",
-            "output.message.content[0].text",
-            "--output",
-            "text",
-        ]
-        result = run_aws_cli(
-            cmd,
-            timeout_sec=timeout_sec,
-            retries=retries,
-            retry_backoff_sec=retry_backoff_sec,
-        )
-        return result.stdout.strip()
-    finally:
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
+    bedrock_client = AwsCliBedrockClient(
+        region=region,
+        profile=profile,
+        timeout_sec=timeout_sec,
+        retries=retries,
+        retry_backoff_sec=retry_backoff_sec,
+    )
+    return bedrock_client.converse(model_id=model_id, payload=payload)
 
 
 def resolve_bedrock_model(
