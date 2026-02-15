@@ -18,27 +18,20 @@ from core.app_config import DEFAULT_RERANK_MODEL
 from core.app_config import DEFAULT_RUNTIME_CONFIG_FILE
 from core.app_config import build_app_config_from_args
 from core.app_config import validate_app_config
-from core.audit import current_times as core_current_times
-from core.audit import make_request_id as core_make_request_id
 from core.audit import system_prompt_sha256 as core_system_prompt_sha256
 from core.audit import write_audit_log as core_write_audit_log
 from core.local_retriever import LocalVectorRetriever
 from core.local_retriever import load_manifest
 from core.local_retriever import load_metadata
-from core.prompt_builder import build_evidence as core_build_evidence
-from core.prompt_builder import build_runtime_evidence_block as core_build_runtime_evidence_block
+from core.qa_flow import run_qa_flow
 from core.retriever_contract import RetrievalHit
 from core.retriever_contract import serialize_hit
 from core.retriever_contract import validate_filters
 from core.retriever_external import ExternalRetriever
 from core.retriever_external import ExternalRetrieverConfig
 from core.retriever_fallback import FallbackRetriever
-from core.query_runtime import build_rule_based_answer
-from core.query_runtime import call_bedrock
 from core.query_runtime import load_runtime_config
 from core.query_runtime import load_system_prompt
-from core.query_runtime import rerank_hits
-from core.query_runtime import resolve_bedrock_model
 from core.query_runtime import resolve_retrieval_filters
 from core.query_runtime import sanitize
 from core.query_runtime import select_default_answer_profile
@@ -325,159 +318,115 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             self._send(*_json_error("question is required.", status=HTTPStatus.BAD_REQUEST))
             return
 
-        request_id = core_make_request_id(str(payload.get("request_id", "")).strip() or None)
-        now_utc, now_jst = core_current_times()
         try:
             top_k = _int_from_request(payload, "top_k", ctx.default_topk, minimum=1)
             backend = _backend_from_request(payload)
-            filters, scope_source = _resolve_filters_and_scope(ctx, query_text=question, payload=payload)
-            hits, retrieval_stats = _search(
-                ctx,
-                query_text=question,
-                top_k=top_k,
-                filters=filters,
-                backend=backend,
+            filters_raw = payload.get("filters")
+            if filters_raw is None:
+                explicit_filters: dict[str, Any] = {}
+            else:
+                if not isinstance(filters_raw, dict):
+                    raise ValueError("filters must be an object.")
+                explicit_filters = validate_filters(filters_raw)
+            rerank_enabled = _bool_from_request(payload, "rerank", ctx.default_rerank)
+            allow_unscoped = _bool_from_request(payload, "allow_unscoped", ctx.allow_unscoped_default)
+            auto_scope_max_docs = _int_from_request(
+                payload,
+                "auto_scope_max_docs",
+                ctx.auto_scope_max_docs,
+                minimum=1,
             )
-        except (ValueError, RuntimeError) as exc:
-            status = HTTPStatus.BAD_REQUEST if isinstance(exc, ValueError) else HTTPStatus.BAD_GATEWAY
-            self._send(*_json_error(str(exc), status=status))
-            return
-
-        rerank_enabled = _bool_from_request(payload, "rerank", ctx.default_rerank)
-        if rerank_enabled:
-            try:
-                hits = rerank_hits(
-                    question=question,
-                    hits=hits,
-                    metadata=ctx.metadata,
-                    region=ctx.region,
-                    profile=ctx.profile,
-                    rerank_model=ctx.rerank_model,
-                    rerank_topn=ctx.rerank_topn,
-                    timeout_sec=ctx.aws_timeout_sec,
-                    retries=ctx.aws_retries,
-                    retry_backoff_sec=ctx.aws_retry_backoff_sec,
-                )
-            except RuntimeError as exc:
-                retrieval_stats["rerank_error"] = str(exc)
-        retrieval_stats["hits_after_rerank"] = len(hits)
-
-        rule_answer = build_rule_based_answer(
-            question=question,
-            metadata=ctx.metadata,
-            today=now_jst.date(),
-            temporal_rules=ctx.runtime_config.temporal_rules,
-        )
-
-        vector_start_rank = 3 if rule_answer else 2
-        vector_evidence, vector_entries = core_build_evidence(
-            hits,
-            ctx.max_context_chars,
-            start_rank=vector_start_rank,
-        )
-        runtime_block, runtime_entry = core_build_runtime_evidence_block(
-            rank=1,
-            request_id=request_id,
-            now_utc=now_utc,
-            now_jst=now_jst,
-        )
-        evidence_parts: list[str] = [runtime_block]
-        evidence_entries: list[dict[str, Any]] = [runtime_entry]
-        if rule_answer:
-            evidence_parts.append(
-                "[2] score(rule=1.00000) doc=local-temporal-helper page=- chunk=-\n"
-                f"{sanitize(rule_answer)}\n"
+            answer_profile = str(payload.get("answer_profile") or "").strip() or select_default_answer_profile(
+                ctx.runtime_config.answer_profiles
             )
-            evidence_entries.append(
-                {
-                    "rank": 2,
-                    "source_type": "local_rule",
-                    "doc": "local-temporal-helper",
-                    "page": -1,
-                    "chunk": -1,
-                }
-            )
-        if vector_evidence:
-            evidence_parts.append(vector_evidence)
-            evidence_entries.extend(vector_entries)
-        evidence_text = ("\n".join(evidence_parts))[: ctx.max_context_chars]
-
-        has_substantive_evidence = bool(hits) or bool(rule_answer)
-        answer_profile = str(payload.get("answer_profile") or "").strip() or select_default_answer_profile(
-            ctx.runtime_config.answer_profiles
-        )
-        bedrock_model_override = str(payload.get("bedrock_model", "")).strip() or None
-        try:
-            bedrock_model = resolve_bedrock_model(
-                answer_profile,
-                bedrock_model_override,
-                ctx.runtime_config.answer_profile_to_model,
-            )
-        except SystemExit as exc:
+            bedrock_model_override = str(payload.get("bedrock_model", "")).strip() or None
+        except ValueError as exc:
             self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
             return
 
-        status = "success"
-        error_message: str | None = None
-        if not evidence_text or not has_substantive_evidence:
-            status = "insufficient"
-            answer = "Evidence is insufficient."
-        else:
-            try:
-                answer = call_bedrock(
-                    question=question,
-                    evidence=evidence_text,
-                    system_prompt=ctx.system_prompt,
-                    max_tokens=ctx.max_tokens,
-                    region=ctx.region,
-                    profile=ctx.profile,
-                    model_id=bedrock_model,
-                    timeout_sec=ctx.aws_timeout_sec,
-                    retries=ctx.aws_retries,
-                    retry_backoff_sec=ctx.aws_retry_backoff_sec,
-                )
-            except RuntimeError as exc:
-                status = "failed"
-                error_message = str(exc)
-                answer = "Evidence is insufficient."
+        def search_fn(query_text: str, top_k_inner: int, filters: dict[str, Any]):
+            return _search(
+                ctx,
+                query_text=query_text,
+                top_k=top_k_inner,
+                filters=filters,
+                backend=backend,
+            )
+
+        try:
+            result = run_qa_flow(
+                question=question,
+                request_id_seed=str(payload.get("request_id", "")).strip() or None,
+                metadata=ctx.metadata,
+                temporal_rules=ctx.runtime_config.temporal_rules,
+                search_fn=search_fn,
+                top_k=top_k,
+                explicit_filters=explicit_filters,
+                runtime_default_filters=ctx.runtime_config.default_retrieval_filters,
+                auto_scope_max_docs=auto_scope_max_docs,
+                allow_unscoped=allow_unscoped,
+                rerank_enabled=rerank_enabled,
+                region=ctx.region,
+                profile=ctx.profile,
+                rerank_model=ctx.rerank_model,
+                rerank_topn=ctx.rerank_topn,
+                timeout_sec=ctx.aws_timeout_sec,
+                retries=ctx.aws_retries,
+                retry_backoff_sec=ctx.aws_retry_backoff_sec,
+                max_context_chars=ctx.max_context_chars,
+                max_tokens=ctx.max_tokens,
+                answer_profile=answer_profile,
+                bedrock_model_override=bedrock_model_override,
+                answer_profile_to_model=ctx.runtime_config.answer_profile_to_model,
+                system_prompt=ctx.system_prompt,
+            )
+        except ValueError as exc:
+            self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
+            return
+        except SystemExit as exc:
+            self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
+            return
+        except RuntimeError as exc:
+            self._send(*_json_error(str(exc), status=HTTPStatus.BAD_GATEWAY))
+            return
 
         response = {
-            "request_id": request_id,
-            "status": status,
+            "request_id": result.request_id,
+            "status": result.status,
             "question": question,
-            "answer": answer,
-            "error": error_message,
+            "answer": result.answer,
+            "error": result.error,
             "answer_profile": answer_profile,
-            "model_id": bedrock_model,
-            "scope_source": scope_source,
-            "filters": filters,
-            "retrieval_stats": retrieval_stats,
-            "evidence_entries": evidence_entries,
+            "model_id": result.model_id,
+            "scope_source": result.scope_source,
+            "filters": result.filters,
+            "retrieval_stats": result.retrieval_stats,
+            "evidence_entries": result.evidence_entries,
         }
 
         if ctx.audit_log_dir:
             payload_row = {
-                "request_id": request_id,
-                "executed_at_utc": now_utc.isoformat(),
-                "executed_at_jst": now_jst.isoformat(),
+                "request_id": result.request_id,
+                "executed_at_utc": result.now_utc.isoformat(),
+                "executed_at_jst": result.now_jst.isoformat(),
                 "region": ctx.region,
                 "profile": ctx.profile,
-                "model_id": bedrock_model,
+                "model_id": result.model_id,
                 "question": sanitize(question),
-                "answer": answer,
-                "status": status,
-                "error": error_message,
+                "answer": result.answer,
+                "status": result.status,
+                "error": result.error,
                 "system_prompt_sha256": core_system_prompt_sha256(ctx.system_prompt),
-                "evidence_entries": evidence_entries,
+                "evidence_entries": result.evidence_entries,
                 "topk": top_k,
                 "rerank": rerank_enabled,
                 "rerank_model": ctx.rerank_model,
                 "rerank_topn": ctx.rerank_topn,
-                "filters": filters,
-                "scope_source": scope_source,
-                "retrieval_stats": retrieval_stats,
+                "filters": result.filters,
+                "scope_source": result.scope_source,
+                "retrieval_stats": result.retrieval_stats,
             }
-            audit_path = core_write_audit_log(ctx.audit_log_dir, request_id, payload_row)
+            audit_path = core_write_audit_log(ctx.audit_log_dir, result.request_id, payload_row)
             response["audit_log_path"] = str(audit_path)
 
         self._send(HTTPStatus.OK, response)

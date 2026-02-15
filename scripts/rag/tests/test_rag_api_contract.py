@@ -28,6 +28,7 @@ if "sentence_transformers" not in sys.modules:
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import core.qa_flow as qa_flow
 from core.retriever_contract import RetrievalHit
 import rag_api_server
 
@@ -113,12 +114,12 @@ def _build_context(
 
 class RagApiContractTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._orig_bedrock = rag_api_server.call_bedrock
-        rag_api_server.call_bedrock = lambda **kwargs: "stub-answer"
+        self._orig_bedrock = qa_flow.call_bedrock
+        qa_flow.call_bedrock = lambda **kwargs: "stub-answer"
         rag_api_server.RagRequestHandler.log_message = lambda *_args: None
 
     def tearDown(self) -> None:
-        rag_api_server.call_bedrock = self._orig_bedrock
+        qa_flow.call_bedrock = self._orig_bedrock
 
     def _with_server(self, ctx: rag_api_server.AppContext):
         server = rag_api_server.RagHTTPServer(("127.0.0.1", 0), rag_api_server.RagRequestHandler)

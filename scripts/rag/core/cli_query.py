@@ -7,20 +7,12 @@ import json
 import sys
 from typing import Any
 
-from core.audit import current_times as core_current_times
-from core.audit import make_request_id as core_make_request_id
 from core.audit import system_prompt_sha256 as core_system_prompt_sha256
 from core.audit import write_audit_log as core_write_audit_log
 from core.local_retriever import LocalVectorRetriever
-from core.prompt_builder import build_evidence as core_build_evidence
-from core.prompt_builder import build_runtime_evidence_block as core_build_runtime_evidence_block
+from core.qa_flow import run_qa_flow
 from core.query_runtime import AnswerProfileConfig
 from core.query_runtime import TemporalMilestoneRule
-from core.query_runtime import build_rule_based_answer
-from core.query_runtime import call_bedrock
-from core.query_runtime import rerank_hits
-from core.query_runtime import resolve_bedrock_model
-from core.query_runtime import resolve_retrieval_filters
 from core.query_runtime import sanitize
 from core.retriever_fallback import FallbackRetriever
 
@@ -101,210 +93,101 @@ def run_single_query(
     local_retriever: LocalVectorRetriever,
     external_fallback_retriever: FallbackRetriever | None,
 ) -> None:
-    request_id = core_make_request_id(args.request_id)
-    now_utc, now_jst = core_current_times()
-    rule_answer = build_rule_based_answer(
-        question=question,
-        metadata=metadata,
-        today=now_jst.date(),
-        temporal_rules=temporal_rules,
-    )
-    try:
-        applied_filters, scope_source = resolve_retrieval_filters(
-            question=question,
-            explicit_filters=args.explicit_retrieval_filters,
-            runtime_default_filters=args.runtime_default_retrieval_filters,
-            metadata=metadata,
-            auto_scope_max_docs=args.auto_scope_max_docs,
-            allow_unscoped=args.allow_unscoped,
-        )
-    except RuntimeError as exc:
-        raise SystemExit(str(exc)) from exc
-    print(
-        f"[INFO] retrieval_scope_source={scope_source} filters="
-        f"{json.dumps(applied_filters, ensure_ascii=False)}",
-        file=sys.stderr,
-    )
+    def _search(query_text: str, top_k: int, filters: dict[str, Any]):
+        if external_fallback_retriever is None:
+            diagnostics = local_retriever.search_with_diagnostics(
+                query_text=query_text,
+                top_k=top_k,
+                filters=filters,
+            )
+            stats = dict(diagnostics.stats)
+            stats["retriever_backend_used"] = "local"
+            stats["fallback_triggered"] = False
+            stats["fallback_error"] = None
+            stats["fallback_error_type"] = None
+            return diagnostics.hits, stats
 
-    if external_fallback_retriever is None:
-        diagnostics = local_retriever.search_with_diagnostics(
-            query_text=question,
-            top_k=args.topk,
-            filters=applied_filters,
-        )
-        contract_hits = diagnostics.hits
-        retrieval_stats = dict(diagnostics.stats)
-        retrieval_stats["retriever_backend_used"] = "local"
-        retrieval_stats["fallback_triggered"] = False
-        retrieval_stats["fallback_error"] = None
-        retrieval_stats["fallback_error_type"] = None
-    else:
         fallback_result = external_fallback_retriever.search_with_fallback(
-            query_text=question,
-            top_k=args.topk,
-            filters=applied_filters,
+            query_text=query_text,
+            top_k=top_k,
+            filters=filters,
         )
-        contract_hits = fallback_result.hits
-        retrieval_stats = {
-            "hits_before_filter": len(contract_hits),
-            "hits_after_filter": len(contract_hits),
-            "hits_after_rerank": len(contract_hits),
-            "filter_pass_rate": 1.0 if contract_hits else 0.0,
-            "zero_hit": len(contract_hits) == 0,
+        stats = {
+            "hits_before_filter": len(fallback_result.hits),
+            "hits_after_filter": len(fallback_result.hits),
+            "hits_after_rerank": len(fallback_result.hits),
+            "filter_pass_rate": 1.0 if fallback_result.hits else 0.0,
+            "zero_hit": len(fallback_result.hits) == 0,
             "retriever_backend_used": fallback_result.backend_used,
             "fallback_triggered": fallback_result.fallback_triggered,
             "fallback_error": fallback_result.error,
             "fallback_error_type": fallback_result.error_type,
         }
-    if args.rerank:
-        try:
-            contract_hits = rerank_hits(
-                question=question,
-                hits=contract_hits,
-                metadata=metadata,
-                region=args.region,
-                profile=args.profile,
-                rerank_model=args.rerank_model,
-                rerank_topn=args.rerank_topn,
-                timeout_sec=args.aws_timeout_sec,
-                retries=args.aws_retries,
-                retry_backoff_sec=args.aws_retry_backoff_sec,
-            )
-        except RuntimeError as exc:
-            print(f"[WARN] Rerank failed. Falling back to vector-only ranking: {exc}", file=sys.stderr)
-    retrieval_stats["hits_after_rerank"] = len(contract_hits)
-    print(
-        "[INFO] retrieval_stats="
-        + json.dumps(retrieval_stats, ensure_ascii=False),
-        file=sys.stderr,
-    )
-    vector_start_rank = 3 if rule_answer else 2
-    vector_evidence, vector_entries = core_build_evidence(
-        contract_hits,
-        args.max_context_chars,
-        start_rank=vector_start_rank,
-    )
+        return fallback_result.hits, stats
 
-    runtime_block, runtime_entry = core_build_runtime_evidence_block(
-        rank=1,
-        request_id=request_id,
-        now_utc=now_utc,
-        now_jst=now_jst,
-    )
-    evidence_parts: list[str] = [runtime_block]
-    evidence_entries: list[dict[str, Any]] = [runtime_entry]
-    if rule_answer:
-        rule_rank = 2
-        evidence_parts.append(
-            f"[{rule_rank}] score(rule=1.00000) doc=local-temporal-helper page=- chunk=-\n"
-            f"{sanitize(rule_answer)}\n"
-        )
-        evidence_entries.append(
-            {
-                "rank": rule_rank,
-                "source_type": "local_rule",
-                "doc": "local-temporal-helper",
-                "page": -1,
-                "chunk": -1,
-            }
-        )
-    if vector_evidence:
-        evidence_parts.append(vector_evidence)
-        evidence_entries.extend(vector_entries)
-    evidence = ("\n".join(evidence_parts))[: args.max_context_chars]
-
-    print("=== TOPK EVIDENCE ===")
-    print(evidence if evidence else "(no hits)")
-    print("=== BEDROCK ANSWER ===")
-    has_substantive_evidence = bool(contract_hits) or bool(rule_answer)
-    if not evidence or not has_substantive_evidence:
-        answer = "Evidence is insufficient."
-        print(answer)
-        if args.audit_log_dir:
-            payload = _build_audit_payload(
-                request_id=request_id,
-                now_utc=now_utc,
-                now_jst=now_jst,
-                args=args,
-                model_id=resolve_bedrock_model(answer_profile, args.bedrock_model, answer_profile_to_model),
-                question=question,
-                answer=answer,
-                status="insufficient",
-                error=None,
-                system_prompt=system_prompt,
-                evidence_entries=evidence_entries,
-                applied_filters=applied_filters,
-                scope_source=scope_source,
-                retrieval_stats=retrieval_stats,
-            )
-            audit_path = core_write_audit_log(args.audit_log_dir, request_id, payload)
-            print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
-        return
-
-    bedrock_model = resolve_bedrock_model(
-        answer_profile,
-        args.bedrock_model,
-        answer_profile_to_model,
-    )
-    answer = ""
-    error_message: str | None = None
     try:
-        answer = call_bedrock(
+        result = run_qa_flow(
             question=question,
-            evidence=evidence,
-            system_prompt=system_prompt,
-            max_tokens=args.max_tokens,
+            request_id_seed=args.request_id,
+            metadata=metadata,
+            temporal_rules=temporal_rules,
+            search_fn=_search,
+            top_k=args.topk,
+            explicit_filters=args.explicit_retrieval_filters,
+            runtime_default_filters=args.runtime_default_retrieval_filters,
+            auto_scope_max_docs=args.auto_scope_max_docs,
+            allow_unscoped=args.allow_unscoped,
+            rerank_enabled=args.rerank,
             region=args.region,
             profile=args.profile,
-            model_id=bedrock_model,
+            rerank_model=args.rerank_model,
+            rerank_topn=args.rerank_topn,
             timeout_sec=args.aws_timeout_sec,
             retries=args.aws_retries,
             retry_backoff_sec=args.aws_retry_backoff_sec,
+            max_context_chars=args.max_context_chars,
+            max_tokens=args.max_tokens,
+            answer_profile=answer_profile,
+            bedrock_model_override=args.bedrock_model,
+            answer_profile_to_model=answer_profile_to_model,
+            system_prompt=system_prompt,
         )
     except RuntimeError as exc:
-        error_message = str(exc)
-        if args.audit_log_dir:
-            payload = _build_audit_payload(
-                request_id=request_id,
-                now_utc=now_utc,
-                now_jst=now_jst,
-                args=args,
-                model_id=bedrock_model,
-                question=question,
-                answer=None,
-                status="failed",
-                error=error_message,
-                system_prompt=system_prompt,
-                evidence_entries=evidence_entries,
-                applied_filters=applied_filters,
-                scope_source=scope_source,
-                retrieval_stats=retrieval_stats,
-            )
-            audit_path = core_write_audit_log(args.audit_log_dir, request_id, payload)
-            print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
-        if args.fail_on_generation_error:
-            raise
-        answer = "Evidence is insufficient."
-        print(answer)
-        return
+        raise SystemExit(str(exc)) from exc
 
-    print(answer)
+    print(
+        f"[INFO] retrieval_scope_source={result.scope_source} filters="
+        f"{json.dumps(result.filters, ensure_ascii=False)}",
+        file=sys.stderr,
+    )
+    print(
+        "[INFO] retrieval_stats="
+        + json.dumps(result.retrieval_stats, ensure_ascii=False),
+        file=sys.stderr,
+    )
+    print("=== TOPK EVIDENCE ===")
+    print(result.evidence_text if result.evidence_text else "(no hits)")
+    print("=== BEDROCK ANSWER ===")
+    if result.status == "failed" and args.fail_on_generation_error:
+        raise RuntimeError(result.error or "Bedrock generation failed.")
+    print(result.answer)
+
     if args.audit_log_dir:
         payload = _build_audit_payload(
-            request_id=request_id,
-            now_utc=now_utc,
-            now_jst=now_jst,
+            request_id=result.request_id,
+            now_utc=result.now_utc,
+            now_jst=result.now_jst,
             args=args,
-            model_id=bedrock_model,
+            model_id=result.model_id,
             question=question,
-            answer=answer,
-            status="success",
-            error=error_message,
+            answer=result.answer if result.status != "failed" else None,
+            status=result.status,
+            error=result.error,
             system_prompt=system_prompt,
-            evidence_entries=evidence_entries,
-            applied_filters=applied_filters,
-            scope_source=scope_source,
-            retrieval_stats=retrieval_stats,
+            evidence_entries=result.evidence_entries,
+            applied_filters=result.filters,
+            scope_source=result.scope_source,
+            retrieval_stats=result.retrieval_stats,
         )
-        audit_path = core_write_audit_log(args.audit_log_dir, request_id, payload)
+        audit_path = core_write_audit_log(args.audit_log_dir, result.request_id, payload)
         print(f"[INFO] Audit log written: {audit_path}", file=sys.stderr)
