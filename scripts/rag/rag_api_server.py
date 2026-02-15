@@ -27,17 +27,17 @@ from core.retriever_contract import validate_filters
 from core.retriever_external import ExternalRetriever
 from core.retriever_external import ExternalRetrieverConfig
 from core.retriever_fallback import FallbackRetriever
+from core.query_runtime import build_rule_based_answer
+from core.query_runtime import call_bedrock
+from core.query_runtime import load_runtime_config
+from core.query_runtime import load_system_prompt
+from core.query_runtime import rerank_hits
+from core.query_runtime import resolve_bedrock_model
+from core.query_runtime import resolve_retrieval_filters
+from core.query_runtime import sanitize
+from core.query_runtime import select_default_answer_profile
 from core.retriever_vast import VastRetriever
 from core.retriever_vast import VastRetrieverConfig
-from rag_vector_cli import build_rule_based_answer
-from rag_vector_cli import call_bedrock
-from rag_vector_cli import load_runtime_config
-from rag_vector_cli import load_system_prompt
-from rag_vector_cli import rerank_hits
-from rag_vector_cli import resolve_bedrock_model
-from rag_vector_cli import resolve_retrieval_filters
-from rag_vector_cli import select_default_answer_profile
-from rag_vector_cli import sanitize
 
 try:
     from sentence_transformers import SentenceTransformer
