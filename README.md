@@ -63,7 +63,7 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 | チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py`, `scripts/rag/core/chunk_*.py`, `scripts/rag/core/pdf_extractor.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。extract/normalize/chunker/quality の責務分割を完了。OCR実処理は未実装。 |
 | Retriever Contract固定 + スコープ運用 | 完了 | `scripts/rag/core/retriever_contract.py`, `scripts/rag/core/scope_resolver.py`, `docs/adr/0001-retriever-contract-and-scope.md` | `search(query_text, top_k, filters) -> hits[]` と許可filterキーを固定。既定は fail-closed（未スコープ時は停止）。 |
 | metadataフィルタ検索 | 完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/core/local_retriever.py` | `--filters-json`、runtime default、自動docスコープ推定を実装。`retrieval_stats` も出力。 |
-| API受け口（/search, /qa, 連携I/F） | 完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` に加え、`/v1/models`, `/v1/chat/completions`, `/integrations/dify/qa` を提供。 |
+| API受け口（/search, /qa, 連携I/F） | 部分完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` に加え、`/v1/models`, `/v1/chat/completions`, `/integrations/dify/qa` を提供。API単体（curl）疎通は確認済み。OpenWebUI/Dify本体デプロイでの実機E2E確認は未完了。 |
 | 差分更新（doc単位） | 部分完了 | `scripts/rag/build_vector_index_incremental.py` | merge/upsert/delete、`backfill/incremental`、fingerprint保存まで実装。イベント駆動トリガは未実装。 |
 | VAST/NetApp準備 | 準備完了（接続は未） | `scripts/rag/core/retriever_vast.py`, `scripts/rag/core/retriever_external.py`, `docs/adr/0002-vast-readiness.md`, `docs/adr/0003-netapp-readiness.md` | アダプタ枠とフォールバック、契約は実装済み。実エンドポイント接続と性能試験は未実施。 |
 | 監査ログ運用 | 部分完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/rag_api_server.py`, `scripts/rag/core/audit.py` | `request_id`、scope/filter、backend/fallback、retrieval_stats を監査ログ化。TTL/保持削除運用は未実装。 |
@@ -511,6 +511,10 @@ curl -s -X POST http://127.0.0.1:8000/integrations/dify/qa \
 - `/v1/chat/completions`: `model`, `messages`, `top_k`, `filters`, `allow_unscoped`, `retriever_backend`, `rerank`
 - `/integrations/dify/qa`: `query|question`, `top_k`, `filters`, `answer_profile`, `allow_unscoped`, `retriever_backend`, `rerank`
 
+連携I/Fの制約（最小互換）:
+- `/v1/chat/completions` は `stream=false` のみ対応（`stream=true` は未対応）。
+- OpenAI互換 `model` は `answer_profile` キー（`cost` / `high`）の指定を推奨。
+
 マッピング仕様（固定）:
 - OpenAI `messages` の最後の `role=user` テキストを `question` にマップ
 - OpenAI `model` は `answer_profile` 優先（未一致時は `bedrock_model` 扱い）
@@ -591,16 +595,26 @@ bash scripts/audit/collect_linux.sh
 | Issue | 優先度 | 状態 | 概要 |
 |---|---|---|---|
 | `#1` https://github.com/unnowataru/vpnless-rag-mvp/issues/1 | Tracker | 進行中 | 全体トラッキング。子Issueの進捗同期を継続。 |
-| `#2` https://github.com/unnowataru/vpnless-rag-mvp/issues/2 | P0 | 完了（Closed） | metadataフィルタ + scope解決を実装済み。 |
-| `#3` https://github.com/unnowataru/vpnless-rag-mvp/issues/3 | P0 | 完了（Closed） | `/search` `/qa` APIを実装済み。 |
-| `#4` https://github.com/unnowataru/vpnless-rag-mvp/issues/4 | P1 | 進行中 | VAST/NetApp準備（アダプタ/ADR）は完了。実接続・性能検証が残。 |
-| `#5` https://github.com/unnowataru/vpnless-rag-mvp/issues/5 | P1 | 進行中 | doc単位差分更新は実装済み。イベント駆動化が残。 |
-| `#6` https://github.com/unnowataru/vpnless-rag-mvp/issues/6 | P2 | 進行中 | request_id付き監査ログは実装済み。TTL/マスク運用設計が残。 |
+| `#4` https://github.com/unnowataru/vpnless-rag-mvp/issues/4 | P1 | 進行中 | VAST/NetApp方針整理。準備実装は完了、実接続結果の反映が残。 |
+| `#5` https://github.com/unnowataru/vpnless-rag-mvp/issues/5 | P1 | 進行中 | doc単位差分更新は実装済み。イベント駆動トリガ/再実行制御が残。 |
+| `#6` https://github.com/unnowataru/vpnless-rag-mvp/issues/6 | P2 | 進行中 | request_id付き監査ログは実装済み。TTL/保持/マスク運用の実装が残。 |
+| `#7` https://github.com/unnowataru/vpnless-rag-mvp/issues/7 | P1 | 進行中 | VAST/NetApp 実接続PoC（adapter本実装 + 性能検証）。 |
+| `#17` https://github.com/unnowataru/vpnless-rag-mvp/issues/17 | P2 | 進行中 | OpenWebUI/Dify連携の親Issue。`#18`/`#19` を管理。 |
+| `#18` https://github.com/unnowataru/vpnless-rag-mvp/issues/18 | P2 | 進行中 | 連携I/F実装は完了。OpenWebUI/Dify本体デプロイでの実機E2E確認が残。 |
+| `#19` https://github.com/unnowataru/vpnless-rag-mvp/issues/19 | P2 | 未着手 | 連携向け最小認証とユーザー文脈監査。 |
+
+主要完了Issue（直近）:
+- `#8` Core分離と肥大化解消リファクタ（Closed）
+- `#9`〜`#16` P1分割タスク（Closed）
+- `#2` metadataフィルタ検索（Closed）
+- `#3` `/search` API実装（Closed）
 
 次の優先順（実装継続）:
-1. `#5` イベント駆動トリガ/再実行制御の設計と実装
-2. `#4` VAST/NetApp 実エンドポイント接続 + フィルタ有無の性能試験
-3. `#6` 監査ログTTL・マスク方針の運用実装
+1. `#18` OpenWebUI / Dify 本体デプロイ環境での実機E2E確認
+2. `#19` 最小認証 + ユーザー文脈（`user_id/tenant_id/session_id`）監査連携
+3. `#7` VAST/NetApp 実接続PoC（filters有無の性能検証を含む）
+4. `#5` イベント駆動トリガ/再実行制御
+5. `#6` 監査ログTTL・保持・マスク運用実装
 
 ## License
 MIT License（`LICENSE` を参照）
