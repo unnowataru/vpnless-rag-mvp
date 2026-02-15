@@ -10,6 +10,7 @@
 
 ## 目次
 - [クイックスタート（すぐに試すならこちら）](#quickstart)
+- [現在地（実装ステータス）](#current-status)
 - [設計原則](#design-principles)
 - [MVPスコープ](#scope)
 - [インフラ観点の配置と責務](#infra-roles)
@@ -21,6 +22,7 @@
 - [Terraform（Linux から実行）](#terraform)
 - [Bedrock 疎通テスト（Linux）](#bedrock-connectivity)
 - [ベクトルRAG実行](#vector-rag)
+- [RAG API実行](#rag-api)
 - [品質評価と回帰テスト](#quality-regression)
 - [ADR（設計判断）](#adr)
 - [Linux監査収集](#linux-audit)
@@ -49,6 +51,26 @@ bash scripts/connectivity/bedrock_converse.sh
 # 5) RAG実行
 python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 ```
+
+<a id="current-status"></a>
+## 現在地（実装ステータス）
+最終確認日: `2026-02-15`
+
+本章は「実装コード + テスト + ADR」を根拠に、現時点の到達点を整理したものです。
+
+| 論点 | 状態 | 根拠（実装） | コメント |
+|---|---|---|---|
+| チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。OCR実処理は未実装。 |
+| Retriever Contract固定 + スコープ運用 | 完了 | `scripts/rag/core/retriever_contract.py`, `scripts/rag/core/scope_resolver.py`, `docs/adr/0001-retriever-contract-and-scope.md` | `search(query_text, top_k, filters) -> hits[]` と許可filterキーを固定。既定は fail-closed（未スコープ時は停止）。 |
+| metadataフィルタ検索 | 完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/core/local_retriever.py` | `--filters-json`、runtime default、自動docスコープ推定を実装。`retrieval_stats` も出力。 |
+| API受け口（/search, /qa） | 完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` を提供。 |
+| 差分更新（doc単位） | 部分完了 | `scripts/rag/build_vector_index_incremental.py` | merge/upsert/delete、`backfill/incremental`、fingerprint保存まで実装。イベント駆動トリガは未実装。 |
+| VAST/NetApp準備 | 準備完了（接続は未） | `scripts/rag/core/retriever_vast.py`, `scripts/rag/core/retriever_external.py`, `docs/adr/0002-vast-readiness.md`, `docs/adr/0003-netapp-readiness.md` | アダプタ枠とフォールバック、契約は実装済み。実エンドポイント接続と性能試験は未実施。 |
+| 監査ログ運用 | 部分完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/rag_api_server.py`, `scripts/rag/core/audit.py` | `request_id`、scope/filter、backend/fallback、retrieval_stats を監査ログ化。TTL/保持削除運用は未実装。 |
+
+検証結果（ローカル実行）:
+- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（16 tests）
+- `python3 scripts/rag/eval/eval_retrieval.py ...` -> `Recall@K=1.0, MRR=1.0, NDCG@K=1.0`
 
 <a id="design-principles"></a>
 ## 設計原則
@@ -305,6 +327,14 @@ python3 scripts/rag/build_vector_index.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index
 ```
 
+差分更新（doc_id単位 merge/upsert/delete）:
+```bash
+python3 scripts/rag/build_vector_index_incremental.py \
+  --chunks /home/user/dev/vpnless-rag-mvp/rag_data/index/chunks.jsonl \
+  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
+  --mode incremental
+```
+
 `build_vector_index.py` の主要既定値:
 - `--embedding-model intfloat/multilingual-e5-small`
 - `--batch-size 64`
@@ -408,6 +438,49 @@ python3 scripts/rag/rag_vector_cli.py \
 - 最終回答は常に `=== BEDROCK ANSWER ===` で返します（ローカル計算だけで回答を確定しません）。
 - この補助計算ルールは `scripts/rag/config/runtime_config.json` の `temporal_rules` を更新して拡張できます（コード修正不要）。
 
+<a id="rag-api"></a>
+## RAG API実行
+CLIと同じ `core` を使うHTTP受け口として、`/search` と `/qa` を提供します。
+
+起動:
+```bash
+python3 scripts/rag/rag_api_server.py \
+  --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+疎通:
+```bash
+curl -s http://127.0.0.1:8000/health
+```
+
+検索:
+```bash
+curl -s -X POST http://127.0.0.1:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query_text":"リフレッシュ休暇について知りたい",
+    "top_k":5
+  }'
+```
+
+QA:
+```bash
+curl -s -X POST http://127.0.0.1:8000/qa \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question":"リフレッシュ休暇について知りたい",
+    "top_k":5,
+    "answer_profile":"cost",
+    "rerank":false
+  }'
+```
+
+主要リクエストキー:
+- `/search`: `query_text`, `top_k`, `filters`, `retriever_backend`, `allow_unscoped`, `auto_scope_max_docs`
+- `/qa`: `question`, `top_k`, `filters`, `answer_profile`, `bedrock_model`, `rerank`
+
 <a id="quality-regression"></a>
 ## 品質評価と回帰テスト
 評価スクリプト:
@@ -462,14 +535,22 @@ bash scripts/audit/collect_linux.sh
 
 <a id="issues"></a>
 ## 差分・実装計画（Issue）
-検証プランPDFとの差分と今後の実装候補は、更新履歴を残しやすいよう GitHub Issue で管理します。
+検証プランPDFとの差分と今後の実装候補は GitHub Issue で管理します。  
+以下は `2026-02-15` 時点の整理です（READMEとIssue本文を同期）。
 
-- 差分トラッカー: `#1` https://github.com/unnowataru/vpnless-rag-mvp/issues/1
-- P0: metadataフィルタ検索: `#2` https://github.com/unnowataru/vpnless-rag-mvp/issues/2
-- P0: `/search` API: `#3` https://github.com/unnowataru/vpnless-rag-mvp/issues/3
-- P1: VAST Data / NetApp / マネージド連携: `#4` https://github.com/unnowataru/vpnless-rag-mvp/issues/4
-- P1: イベント駆動インデクシング: `#5` https://github.com/unnowataru/vpnless-rag-mvp/issues/5
-- P2: 監査ログ運用（相関ID・TTL・マスク）: `#6` https://github.com/unnowataru/vpnless-rag-mvp/issues/6
+| Issue | 優先度 | 状態 | 概要 |
+|---|---|---|---|
+| `#1` https://github.com/unnowataru/vpnless-rag-mvp/issues/1 | Tracker | 進行中 | 全体トラッキング。子Issueの進捗同期を継続。 |
+| `#2` https://github.com/unnowataru/vpnless-rag-mvp/issues/2 | P0 | 完了（Closed） | metadataフィルタ + scope解決を実装済み。 |
+| `#3` https://github.com/unnowataru/vpnless-rag-mvp/issues/3 | P0 | 完了（Closed） | `/search` `/qa` APIを実装済み。 |
+| `#4` https://github.com/unnowataru/vpnless-rag-mvp/issues/4 | P1 | 進行中 | VAST/NetApp準備（アダプタ/ADR）は完了。実接続・性能検証が残。 |
+| `#5` https://github.com/unnowataru/vpnless-rag-mvp/issues/5 | P1 | 進行中 | doc単位差分更新は実装済み。イベント駆動化が残。 |
+| `#6` https://github.com/unnowataru/vpnless-rag-mvp/issues/6 | P2 | 進行中 | request_id付き監査ログは実装済み。TTL/マスク運用設計が残。 |
+
+次の優先順（実装継続）:
+1. `#5` イベント駆動トリガ/再実行制御の設計と実装
+2. `#4` VAST/NetApp 実エンドポイント接続 + フィルタ有無の性能試験
+3. `#6` 監査ログTTL・マスク方針の運用実装
 
 ## License
 MIT License（`LICENSE` を参照）

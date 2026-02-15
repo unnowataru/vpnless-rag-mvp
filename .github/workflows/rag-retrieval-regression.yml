@@ -38,5 +38,7 @@ jobs:
           python -m py_compile \
             scripts/rag/build_chunks_from_pdfs.py \
             scripts/rag/build_vector_index.py \
+            scripts/rag/build_vector_index_incremental.py \
             scripts/rag/rag_vector_cli.py \
+            scripts/rag/rag_api_server.py \
             scripts/rag/eval/eval_retrieval.py

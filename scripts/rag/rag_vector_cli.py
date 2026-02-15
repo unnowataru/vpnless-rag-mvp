@@ -4,26 +4,25 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import sys
 import tempfile
-import uuid
 from dataclasses import dataclass
 from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from core.audit import current_times as core_current_times
 from core.audit import make_request_id as core_make_request_id
 from core.audit import system_prompt_sha256 as core_system_prompt_sha256
 from core.audit import write_audit_log as core_write_audit_log
 from core.bedrock_client import run_aws_cli
 from core.local_retriever import LocalVectorRetriever
+from core.local_retriever import load_manifest
+from core.local_retriever import load_metadata
 from core.prompt_builder import build_evidence as core_build_evidence
 from core.prompt_builder import build_runtime_evidence_block as core_build_runtime_evidence_block
 from core.retriever_external import ExternalRetriever
@@ -33,14 +32,7 @@ from core.scope_resolver import infer_doc_id_scope_filters
 from core.retriever_vast import VastRetriever
 from core.retriever_vast import VastRetrieverConfig
 from core.retriever_contract import RetrievalHit
-from core.retriever_contract import build_hit_from_row
-from core.retriever_contract import serialize_hit
 from core.retriever_contract import validate_filters
-
-try:
-    import faiss  # type: ignore
-except ImportError:
-    faiss = None
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -55,7 +47,6 @@ DEFAULT_REGION = "ap-northeast-1"
 DEFAULT_PROFILE = "rag"
 DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
 DEFAULT_RUNTIME_CONFIG_FILE = "scripts/rag/config/runtime_config.json"
-JST = timezone(timedelta(hours=9), "JST")
 FALLBACK_SYSTEM_PROMPT = (
     "You must answer ONLY using the Evidence blocks.\n"
     "Output in Japanese.\n"
@@ -254,24 +245,6 @@ def build_rule_based_answer(
     return None
 
 
-def make_request_id(provided: str | None) -> str:
-    if provided:
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", provided).strip("._-")
-        if safe:
-            return safe[:128]
-    return uuid.uuid4().hex
-
-
-def current_times() -> tuple[datetime, datetime]:
-    now_utc = datetime.now(timezone.utc)
-    now_jst = now_utc.astimezone(JST)
-    return now_utc, now_jst
-
-
-def system_prompt_sha256(system_prompt: str) -> str:
-    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
-
-
 def load_runtime_config(path: str) -> RuntimeConfig:
     config_path = Path(path).expanduser().resolve()
     if not config_path.exists():
@@ -378,28 +351,6 @@ def load_system_prompt(path: str | None, default_path: Path | None) -> str:
     return text
 
 
-def load_manifest(index_dir: Path) -> dict[str, Any]:
-    manifest_path = index_dir / "manifest.json"
-    if not manifest_path.exists():
-        raise FileNotFoundError(
-            f"Missing {manifest_path}. Build index first with scripts/rag/build_vector_index.py."
-        )
-    return json.loads(manifest_path.read_text(encoding="utf-8"))
-
-
-def load_metadata(index_dir: Path) -> list[dict[str, Any]]:
-    metadata_path = index_dir / "metadata.jsonl"
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"Missing {metadata_path}.")
-    rows: list[dict[str, Any]] = []
-    with metadata_path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
 def parse_filters_json(raw: str | None) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -439,173 +390,6 @@ def resolve_retrieval_filters(
         "Provide --filters-json, configure default_retrieval_filters in runtime config, "
         "or use --allow-unscoped."
     )
-
-
-def embed_query(model: SentenceTransformer, question: str, query_prefix: str) -> np.ndarray:
-    query = f"{query_prefix}{question}" if query_prefix else question
-    vec = model.encode([query], normalize_embeddings=True, convert_to_numpy=True)
-    return np.asarray(vec, dtype=np.float32)
-
-
-def topk_search(
-    qvec: np.ndarray, topk: int, index_dir: Path, backend: str
-) -> tuple[np.ndarray, np.ndarray]:
-    if backend == "faiss":
-        if faiss is None:
-            raise RuntimeError(
-                "faiss index detected but faiss is not installed. "
-                "Install with: pip install faiss-cpu"
-            )
-        index_path = index_dir / "vectors.faiss"
-        if not index_path.exists():
-            raise FileNotFoundError(f"Missing {index_path}.")
-        index = faiss.read_index(str(index_path))
-        return index.search(qvec, topk)
-
-    vectors_path = index_dir / "vectors.npy"
-    if not vectors_path.exists():
-        raise FileNotFoundError(f"Missing {vectors_path}.")
-
-    matrix = np.load(vectors_path).astype(np.float32, copy=False)
-    scores = matrix @ qvec[0]
-    if len(scores) == 0:
-        return np.array([[]], dtype=np.float32), np.array([[]], dtype=np.int64)
-
-    topk = min(topk, len(scores))
-    candidate_idx = np.argpartition(scores, -topk)[-topk:]
-    sorted_idx = candidate_idx[np.argsort(scores[candidate_idx])[::-1]]
-    return scores[sorted_idx][None, :], sorted_idx[None, :]
-
-
-def collect_hits(results_scores: np.ndarray, results_ids: np.ndarray) -> list[dict[str, Any]]:
-    hits: list[dict[str, Any]] = []
-    for score, idx in zip(results_scores[0], results_ids[0]):
-        int_idx = int(idx)
-        if int_idx < 0:
-            continue
-        hits.append({"idx": int_idx, "vector_score": float(score)})
-    return hits
-
-
-def _as_tuple(value: Any) -> tuple[str, ...]:
-    if isinstance(value, list):
-        return tuple(str(v) for v in value)
-    if isinstance(value, tuple):
-        return tuple(str(v) for v in value)
-    if value is None:
-        return ()
-    return (str(value),)
-
-
-def _matches_filter_value(actual: Any, expected: Any) -> bool:
-    actual_values = {v.strip() for v in _as_tuple(actual) if v.strip()}
-    if isinstance(expected, (list, tuple)):
-        expected_values = {str(v).strip() for v in expected if str(v).strip()}
-        return bool(actual_values & expected_values)
-    text = str(expected).strip()
-    if not text:
-        return True
-    return text in actual_values
-
-
-def _matches_updated_at(actual: Any, expected: Any) -> bool:
-    actual_text = str(actual or "").strip()
-    if not actual_text:
-        return False
-    if isinstance(expected, dict):
-        gte = str(expected.get("gte", "")).strip()
-        lte = str(expected.get("lte", "")).strip()
-        if gte and actual_text < gte:
-            return False
-        if lte and actual_text > lte:
-            return False
-        return True
-    return _matches_filter_value(actual_text, expected)
-
-
-def row_matches_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:
-    if not filters:
-        return True
-    for key, expected in filters.items():
-        if key == "doc_id":
-            actual = row.get("doc_id") or row.get("doc")
-        elif key == "label":
-            labels = row.get("labels")
-            actual = labels if labels else row.get("label")
-        elif key == "updated_at":
-            if not _matches_updated_at(row.get("updated_at"), expected):
-                return False
-            continue
-        else:
-            actual = row.get(key)
-        if not _matches_filter_value(actual, expected):
-            return False
-    return True
-
-
-def apply_filters_to_hits(
-    hits: list[dict[str, Any]],
-    metadata: list[dict[str, Any]],
-    filters: dict[str, Any],
-) -> list[dict[str, Any]]:
-    if not filters:
-        return hits
-    filtered: list[dict[str, Any]] = []
-    for hit in hits:
-        idx = int(hit["idx"])
-        if idx < 0 or idx >= len(metadata):
-            continue
-        if row_matches_filters(metadata[idx], filters):
-            filtered.append(hit)
-    return filtered
-
-
-def build_retrieval_stats(
-    total_hits_before_filter: int,
-    total_hits_after_filter: int,
-    total_hits_after_rerank: int,
-) -> dict[str, Any]:
-    pass_rate = (
-        float(total_hits_after_filter) / float(total_hits_before_filter)
-        if total_hits_before_filter > 0
-        else 0.0
-    )
-    return {
-        "hits_before_filter": total_hits_before_filter,
-        "hits_after_filter": total_hits_after_filter,
-        "hits_after_rerank": total_hits_after_rerank,
-        "filter_pass_rate": pass_rate,
-        "zero_hit": total_hits_after_filter == 0,
-    }
-
-
-def to_contract_hits(
-    hits: list[dict[str, Any]],
-    metadata: list[dict[str, Any]],
-    snippet_chars: int,
-) -> list[RetrievalHit]:
-    contract_hits: list[RetrievalHit] = []
-    for hit in hits:
-        idx = int(hit["idx"])
-        if idx < 0 or idx >= len(metadata):
-            continue
-        row = metadata[idx]
-        vector_score = hit.get("vector_score")
-        rerank_score = hit.get("rerank_score")
-        effective_score = rerank_score if rerank_score is not None else vector_score
-        if effective_score is None:
-            effective_score = 0.0
-        contract_hits.append(
-            build_hit_from_row(
-                row=row,
-                score=float(effective_score),
-                snippet_chars=snippet_chars,
-                fallback_index=idx,
-                vector_score=float(vector_score) if vector_score is not None else None,
-                rerank_score=float(rerank_score) if rerank_score is not None else None,
-            )
-        )
-    return contract_hits
 
 
 def to_rerank_model_arn(model_id_or_arn: str, region: str) -> str:
@@ -721,72 +505,6 @@ def rerank_hits(
             os.remove(temp_path)
         except OSError:
             pass
-
-
-def build_evidence(
-    hits: list[RetrievalHit],
-    max_context_chars: int,
-    start_rank: int = 1,
-) -> tuple[str, list[dict[str, Any]]]:
-    parts: list[str] = []
-    entries: list[dict[str, Any]] = []
-    for rank, hit in enumerate(hits, start=start_rank):
-        doc = hit.doc_meta.get("doc")
-        page = hit.doc_meta.get("page")
-        chunk = hit.doc_meta.get("chunk")
-        section = "/".join(hit.section_path) if hit.section_path else "-"
-        labels = ",".join(hit.labels) if hit.labels else "-"
-
-        score_str = f"score={hit.score:.5f}"
-        if hit.vector_score is not None:
-            score_str += f" vector={hit.vector_score:.5f}"
-        if hit.rerank_score is not None:
-            score_str += f" rerank={hit.rerank_score:.5f}"
-        parts.append(
-            f"[{rank}] score({score_str}) doc={doc} "
-            f"page={page} chunk={chunk} chunk_id={hit.chunk_id} "
-            f"section={section} labels={labels}\n"
-            f"{sanitize(hit.text_snippet)}\n"
-        )
-        entry = serialize_hit(hit)
-        entry["rank"] = rank
-        entry["source_type"] = "vector"
-        entries.append(entry)
-    return ("\n".join(parts))[:max_context_chars], entries
-
-
-def build_runtime_evidence_block(
-    rank: int, request_id: str, now_utc: datetime, now_jst: datetime
-) -> tuple[str, dict[str, Any]]:
-    block = (
-        f"[{rank}] score(runtime=1.00000) doc=runtime-context page=- chunk=-\n"
-        f"request_id={request_id} "
-        f"executed_at_utc={now_utc.isoformat()} "
-        f"executed_at_jst={now_jst.isoformat()} "
-        f"today_jst={now_jst.date().isoformat()} "
-        "relative_date_reference=today_jst\n"
-    )
-    entry = {
-        "rank": rank,
-        "source_type": "runtime_context",
-        "request_id": request_id,
-        "executed_at_utc": now_utc.isoformat(),
-        "executed_at_jst": now_jst.isoformat(),
-        "today_jst": now_jst.date().isoformat(),
-    }
-    return block, entry
-
-
-def write_audit_log(log_dir: str, request_id: str, payload: dict[str, Any]) -> Path:
-    root = Path(log_dir).expanduser()
-    root.mkdir(parents=True, exist_ok=True)
-    stamp = payload.get("executed_at_utc", "").replace(":", "").replace("-", "")
-    safe_stamp = re.sub(r"[^0-9TZ\.]", "", str(stamp)) or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = root / f"{safe_stamp}_{request_id}.json"
-    if out.exists():
-        out = root / f"{safe_stamp}_{request_id}_{uuid.uuid4().hex[:8]}.json"
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return out
 
 
 def call_bedrock(
