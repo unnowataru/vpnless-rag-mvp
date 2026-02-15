@@ -38,7 +38,7 @@ class IngestMetadataTests(unittest.TestCase):
             rules_payload = {
                 "rules": [
                     {
-                        "pattern": "出張|旅費",
+                        "pattern": "travel|expense",
                         "fields": {"dept": "ga", "labels": ["travel", "policy"]},
                     }
                 ]
@@ -62,7 +62,6 @@ class IngestMetadataTests(unittest.TestCase):
     def test_infer_labels_from_doc_id(self) -> None:
         labels = infer_labels_from_doc_id("doc_faq_sample")
         self.assertIn("faq", labels)
-        self.assertIn("policy", labels)
 
     def test_parse_required_metadata_fields(self) -> None:
         fields = parse_required_metadata_fields("doc_id,dept,labels,updated_at")

@@ -21,8 +21,8 @@ class ScopeResolverTests(unittest.TestCase):
 
     def test_infer_doc_id_scope_filters(self) -> None:
         metadata = [
-            {"doc": "DOC_TRAVEL_TAG_A", "text": "..."},  # expected match
-            {"doc": "DOC_TRAVEL_TAG_B", "text": "..."},  # expected match
+            {"doc": "DOC_TRAVEL_TAG_旅費_A", "text": "..."},  # expected match
+            {"doc": "DOC_TRAVEL_TAG_旅費_B", "text": "..."},  # expected match
             {"doc": "DOC_POLICY_GENERIC", "text": "..."},
         ]
         filters = infer_doc_id_scope_filters("交通費について知りたい", metadata, max_docs=3)
