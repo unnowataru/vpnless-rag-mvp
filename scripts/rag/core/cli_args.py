@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 
-DEFAULT_REGION = "ap-northeast-1"
-DEFAULT_PROFILE = "rag"
-DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
-DEFAULT_RUNTIME_CONFIG_FILE = "scripts/rag/config/runtime_config.json"
+from core.app_config import DEFAULT_PROFILE
+from core.app_config import DEFAULT_REGION
+from core.app_config import DEFAULT_RERANK_MODEL
+from core.app_config import DEFAULT_RUNTIME_CONFIG_FILE
+from core.app_config import AppConfig
+from core.app_config import build_app_config_from_args
+from core.app_config import validate_app_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -148,16 +151,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def validate_args(args: argparse.Namespace) -> None:
-    if args.topk <= 0:
-        raise SystemExit("--topk must be greater than 0.")
-    if args.snippet_max_chars <= 0:
-        raise SystemExit("--snippet-max-chars must be greater than 0.")
-    if args.auto_scope_max_docs <= 0:
-        raise SystemExit("--auto-scope-max-docs must be greater than 0.")
-    if args.aws_timeout_sec <= 0:
-        raise SystemExit("--aws-timeout-sec must be greater than 0.")
-    if args.aws_retries < 0:
-        raise SystemExit("--aws-retries must be 0 or greater.")
-    if args.aws_retry_backoff_sec <= 0:
-        raise SystemExit("--aws-retry-backoff-sec must be greater than 0.")
+def validate_args(args: argparse.Namespace) -> AppConfig:
+    config = build_app_config_from_args(args)
+    validate_app_config(config, require_port=False)
+    return config

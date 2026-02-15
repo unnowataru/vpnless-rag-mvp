@@ -33,7 +33,21 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
 
 def main() -> None:
     args = parse_args()
-    validate_args(args)
+    app_config = validate_args(args)
+    args.topk = app_config.topk
+    args.rerank = app_config.rerank
+    args.rerank_model = app_config.rerank_model
+    args.rerank_topn = app_config.rerank_topn
+    args.max_context_chars = app_config.max_context_chars
+    args.max_tokens = app_config.max_tokens
+    args.snippet_max_chars = app_config.snippet_max_chars
+    args.region = app_config.region
+    args.profile = app_config.profile
+    args.aws_timeout_sec = app_config.aws_timeout_sec
+    args.aws_retries = app_config.aws_retries
+    args.aws_retry_backoff_sec = app_config.aws_retry_backoff_sec
+    args.auto_scope_max_docs = app_config.auto_scope_max_docs
+    args.allow_unscoped = app_config.allow_unscoped
     args.explicit_retrieval_filters = parse_filters_json(args.filters_json)
 
     index_dir = Path(args.index_dir)

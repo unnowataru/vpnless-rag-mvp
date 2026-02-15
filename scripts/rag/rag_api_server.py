@@ -12,6 +12,12 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from core.app_config import DEFAULT_PROFILE
+from core.app_config import DEFAULT_REGION
+from core.app_config import DEFAULT_RERANK_MODEL
+from core.app_config import DEFAULT_RUNTIME_CONFIG_FILE
+from core.app_config import build_app_config_from_args
+from core.app_config import validate_app_config
 from core.audit import current_times as core_current_times
 from core.audit import make_request_id as core_make_request_id
 from core.audit import system_prompt_sha256 as core_system_prompt_sha256
@@ -46,12 +52,6 @@ except ImportError as exc:  # pragma: no cover - runtime guidance
         "Missing dependency: sentence-transformers. "
         "Install with: pip install -r scripts/rag/requirements.txt"
     ) from exc
-
-
-DEFAULT_RUNTIME_CONFIG_FILE = "scripts/rag/config/runtime_config.json"
-DEFAULT_REGION = "ap-northeast-1"
-DEFAULT_PROFILE = "rag"
-DEFAULT_RERANK_MODEL = "amazon.rerank-v1:0"
 
 
 @dataclass(frozen=True)
@@ -490,10 +490,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.topk <= 0:
-        raise SystemExit("--topk must be greater than 0.")
-    if args.port <= 0:
-        raise SystemExit("--port must be greater than 0.")
+    app_config = build_app_config_from_args(args)
+    validate_app_config(app_config, require_port=True)
 
     index_dir = Path(args.index_dir)
     manifest = load_manifest(index_dir)
@@ -508,20 +506,20 @@ def main() -> None:
         metadata=metadata,
         model=model,
         query_prefix=manifest.get("query_prefix", ""),
-        snippet_chars=args.snippet_max_chars,
+        snippet_chars=app_config.snippet_max_chars,
     )
     vast_primary = VastRetriever(
         VastRetrieverConfig(
             endpoint=args.vast_endpoint,
             collection=args.vast_collection,
-            timeout_sec=args.aws_timeout_sec,
+            timeout_sec=app_config.aws_timeout_sec,
         )
     )
     external_primary = ExternalRetriever(
         ExternalRetrieverConfig(
             endpoint=args.external_endpoint,
             provider=args.external_provider,
-            timeout_sec=args.aws_timeout_sec,
+            timeout_sec=app_config.aws_timeout_sec,
         )
     )
     if args.local_fallback_on_retriever_error:
@@ -558,25 +556,26 @@ def main() -> None:
         metadata=metadata,
         runtime_config=runtime_config,
         system_prompt=system_prompt,
-        region=args.region,
-        profile=args.profile,
-        default_topk=args.topk,
-        default_rerank=args.rerank,
-        rerank_model=args.rerank_model,
-        rerank_topn=args.rerank_topn,
-        max_context_chars=args.max_context_chars,
-        max_tokens=args.max_tokens,
-        aws_timeout_sec=args.aws_timeout_sec,
-        aws_retries=args.aws_retries,
-        aws_retry_backoff_sec=args.aws_retry_backoff_sec,
-        allow_unscoped_default=args.allow_unscoped_default,
-        auto_scope_max_docs=args.auto_scope_max_docs,
+        region=app_config.region,
+        profile=app_config.profile,
+        default_topk=app_config.topk,
+        default_rerank=app_config.rerank,
+        rerank_model=app_config.rerank_model,
+        rerank_topn=app_config.rerank_topn,
+        max_context_chars=app_config.max_context_chars,
+        max_tokens=app_config.max_tokens,
+        aws_timeout_sec=app_config.aws_timeout_sec,
+        aws_retries=app_config.aws_retries,
+        aws_retry_backoff_sec=app_config.aws_retry_backoff_sec,
+        allow_unscoped_default=app_config.allow_unscoped,
+        auto_scope_max_docs=app_config.auto_scope_max_docs,
         audit_log_dir=args.audit_log_dir,
     )
 
-    server = RagHTTPServer((args.host, args.port), RagRequestHandler)
+    server_port = app_config.port if app_config.port is not None else args.port
+    server = RagHTTPServer((args.host, server_port), RagRequestHandler)
     server.context = context
-    print(f"RAG API server listening on http://{args.host}:{args.port}")
+    print(f"RAG API server listening on http://{args.host}:{server_port}")
     server.serve_forever()
 
 

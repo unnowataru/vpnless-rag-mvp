@@ -13,8 +13,16 @@ from core.cli_args import validate_args
 def make_args(**overrides: object) -> SimpleNamespace:
     base = {
         "topk": 5,
+        "rerank": True,
+        "rerank_model": "amazon.rerank-v1:0",
+        "rerank_topn": 0,
+        "max_context_chars": 12000,
+        "max_tokens": 512,
         "snippet_max_chars": 1200,
+        "region": "ap-northeast-1",
+        "profile": "rag",
         "auto_scope_max_docs": 6,
+        "allow_unscoped": False,
         "aws_timeout_sec": 45,
         "aws_retries": 1,
         "aws_retry_backoff_sec": 1.0,
