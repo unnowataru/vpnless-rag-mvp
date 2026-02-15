@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .retriever_contract import RetrievalHit
+from .retriever_contract import RetrieverBackendError
 from .retriever_contract import Retriever
 from .retriever_contract import normalize_search_score
 from .retriever_contract import validate_filters
@@ -33,7 +34,7 @@ class ExternalRetriever(Retriever):
         _ = query_text
         _ = top_k
         _ = validate_filters(filters)
-        raise RuntimeError(
+        raise RetrieverBackendError(
             f"External retriever provider '{self.config.provider}' is not configured in this environment."
         )
 

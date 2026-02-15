@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .retriever_contract import RetrieverBackendError
 from .retriever_contract import RetrievalHit
 from .retriever_contract import Retriever
 
@@ -46,7 +47,7 @@ class FallbackRetriever:
                 fallback_triggered=False,
                 error=None,
             )
-        except Exception as exc:  # pragma: no cover - runtime fallback path
+        except RetrieverBackendError as exc:  # pragma: no cover - runtime fallback path
             hits = self.fallback.search(query_text=query_text, top_k=top_k, filters=filters)
             return FallbackSearchResult(
                 hits=hits,
