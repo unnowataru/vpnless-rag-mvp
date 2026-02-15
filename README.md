@@ -60,7 +60,7 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 
 | 論点 | 状態 | 根拠（実装） | コメント |
 |---|---|---|---|
-| チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。OCR実処理は未実装。 |
+| チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py`, `scripts/rag/core/chunk_*.py`, `scripts/rag/core/pdf_extractor.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。extract/normalize/chunker/quality の責務分割を完了。OCR実処理は未実装。 |
 | Retriever Contract固定 + スコープ運用 | 完了 | `scripts/rag/core/retriever_contract.py`, `scripts/rag/core/scope_resolver.py`, `docs/adr/0001-retriever-contract-and-scope.md` | `search(query_text, top_k, filters) -> hits[]` と許可filterキーを固定。既定は fail-closed（未スコープ時は停止）。 |
 | metadataフィルタ検索 | 完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/core/local_retriever.py` | `--filters-json`、runtime default、自動docスコープ推定を実装。`retrieval_stats` も出力。 |
 | API受け口（/search, /qa） | 完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` を提供。 |
@@ -69,7 +69,7 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 | 監査ログ運用 | 部分完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/rag_api_server.py`, `scripts/rag/core/audit.py` | `request_id`、scope/filter、backend/fallback、retrieval_stats を監査ログ化。TTL/保持削除運用は未実装。 |
 
 検証結果（ローカル実行）:
-- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（16 tests）
+- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（40 tests）
 - `python3 scripts/rag/eval/eval_retrieval.py ...` -> `Recall@K=1.0, MRR=1.0, NDCG@K=1.0`
 
 <a id="design-principles"></a>
