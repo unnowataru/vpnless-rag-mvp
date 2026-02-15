@@ -63,13 +63,13 @@ python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
 | チャンク品質の改善 | 部分完了 | `scripts/rag/build_chunks_from_pdfs.py`, `scripts/rag/core/chunk_*.py`, `scripts/rag/core/pdf_extractor.py` | `pypdf` + `pymupdf` 複線抽出、品質スコア採用、ヘッダー/フッター頻出行除去、段落優先分割、`scan_suspected`/`extract_engine`/`extract_score` 付与まで実装。extract/normalize/chunker/quality の責務分割を完了。OCR実処理は未実装。 |
 | Retriever Contract固定 + スコープ運用 | 完了 | `scripts/rag/core/retriever_contract.py`, `scripts/rag/core/scope_resolver.py`, `docs/adr/0001-retriever-contract-and-scope.md` | `search(query_text, top_k, filters) -> hits[]` と許可filterキーを固定。既定は fail-closed（未スコープ時は停止）。 |
 | metadataフィルタ検索 | 完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/core/local_retriever.py` | `--filters-json`、runtime default、自動docスコープ推定を実装。`retrieval_stats` も出力。 |
-| API受け口（/search, /qa） | 完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` を提供。 |
+| API受け口（/search, /qa, 連携I/F） | 完了 | `scripts/rag/rag_api_server.py` | CLIと同じcoreを使うHTTP APIを実装。`/health`, `/search`, `/qa` に加え、`/v1/models`, `/v1/chat/completions`, `/integrations/dify/qa` を提供。 |
 | 差分更新（doc単位） | 部分完了 | `scripts/rag/build_vector_index_incremental.py` | merge/upsert/delete、`backfill/incremental`、fingerprint保存まで実装。イベント駆動トリガは未実装。 |
 | VAST/NetApp準備 | 準備完了（接続は未） | `scripts/rag/core/retriever_vast.py`, `scripts/rag/core/retriever_external.py`, `docs/adr/0002-vast-readiness.md`, `docs/adr/0003-netapp-readiness.md` | アダプタ枠とフォールバック、契約は実装済み。実エンドポイント接続と性能試験は未実施。 |
 | 監査ログ運用 | 部分完了 | `scripts/rag/rag_vector_cli.py`, `scripts/rag/rag_api_server.py`, `scripts/rag/core/audit.py` | `request_id`、scope/filter、backend/fallback、retrieval_stats を監査ログ化。TTL/保持削除運用は未実装。 |
 
 検証結果（ローカル実行）:
-- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（40 tests）
+- `python3 -m unittest discover -s scripts/rag/tests -p 'test_*.py'` -> `OK`（44 tests）
 - `python3 scripts/rag/eval/eval_retrieval.py ...` -> `Recall@K=1.0, MRR=1.0, NDCG@K=1.0`
 
 <a id="design-principles"></a>
@@ -440,14 +440,16 @@ python3 scripts/rag/rag_vector_cli.py \
 
 <a id="rag-api"></a>
 ## RAG API実行
-CLIと同じ `core` を使うHTTP受け口として、`/search` と `/qa` を提供します。
+CLIと同じ `core` を使うHTTP受け口として、`/search` と `/qa` を提供します。  
+連携用途として、OpenAI互換の最小I/F（`/v1/models`, `/v1/chat/completions`）と Dify向けI/F（`/integrations/dify/qa`）も提供します。
 
 起動:
 ```bash
 python3 scripts/rag/rag_api_server.py \
   --index-dir /home/user/dev/vpnless-rag-mvp/rag_data/index \
   --host 127.0.0.1 \
-  --port 8000
+  --port 8000 \
+  --cors-allow-origin "*"
 ```
 
 疎通:
@@ -477,9 +479,53 @@ curl -s -X POST http://127.0.0.1:8000/qa \
   }'
 ```
 
+OpenAI互換（OpenWebUI接続用の最小I/F）:
+```bash
+curl -s http://127.0.0.1:8000/v1/models
+
+curl -s -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"cost",
+    "messages":[
+      {"role":"user","content":"リフレッシュ休暇について知りたい"}
+    ],
+    "allow_unscoped": true
+  }'
+```
+
+Dify連携向け:
+```bash
+curl -s -X POST http://127.0.0.1:8000/integrations/dify/qa \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":"リフレッシュ休暇について知りたい",
+    "answer_profile":"cost",
+    "allow_unscoped": true
+  }'
+```
+
 主要リクエストキー:
 - `/search`: `query_text`, `top_k`, `filters`, `retriever_backend`, `allow_unscoped`, `auto_scope_max_docs`
 - `/qa`: `question`, `top_k`, `filters`, `answer_profile`, `bedrock_model`, `rerank`
+- `/v1/chat/completions`: `model`, `messages`, `top_k`, `filters`, `allow_unscoped`, `retriever_backend`, `rerank`
+- `/integrations/dify/qa`: `query|question`, `top_k`, `filters`, `answer_profile`, `allow_unscoped`, `retriever_backend`, `rerank`
+
+マッピング仕様（固定）:
+- OpenAI `messages` の最後の `role=user` テキストを `question` にマップ
+- OpenAI `model` は `answer_profile` 優先（未一致時は `bedrock_model` 扱い）
+- Dify `query`（または `question`）を `question` にマップ
+- `top_k` / `filters` / `allow_unscoped` / `rerank` は各I/Fから `/qa` と同じ意味で渡す
+
+エラー整形ポリシー:
+- `/search`, `/qa`: `{"error":"..."}`（既存）
+- `/v1/chat/completions`: `{"error":{"message":"...","type":"..."}}`
+- `/integrations/dify/qa`: `{"code":"...","message":"..."}`
+
+CORS/timeout/retry（PoC推奨）:
+- CORS: `--cors-allow-origin "*"`（本番は明示オリジンへ限定）
+- timeout/retry: `--aws-timeout-sec`, `--aws-retries`, `--aws-retry-backoff-sec` を利用
+- 連携初期は `rerank=false` で疎通確認してから有効化
 
 <a id="quality-regression"></a>
 ## 品質評価と回帰テスト

@@ -171,6 +171,20 @@ class RagApiContractTests(unittest.TestCase):
             thread.join(timeout=5)
             server.server_close()
 
+    def test_openai_models(self) -> None:
+        server, thread = self._with_server(_build_context())
+        try:
+            status, body = self._request(server=server, method="GET", path="/v1/models")
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("object"), "list")
+            self.assertIsInstance(body.get("data"), list)
+            self.assertGreaterEqual(len(body.get("data", [])), 1)
+            self.assertEqual(body["data"][0].get("id"), "cost")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
     def test_search_bad_request_when_query_missing(self) -> None:
         server, thread = self._with_server(_build_context())
         try:
@@ -264,6 +278,93 @@ class RagApiContractTests(unittest.TestCase):
             self.assertIsInstance(body.get("retrieval_stats"), dict)
             self.assertIsInstance(body.get("evidence_entries"), list)
             self.assertGreaterEqual(len(body.get("evidence_entries", [])), 2)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_openai_chat_completions_success(self) -> None:
+        hit = RetrievalHit(
+            chunk_id="DOC_POLICY_001:p1:c0:o0:h001",
+            score=0.91,
+            text_snippet="規程の要点",
+            doc_meta={"doc": "DOC_POLICY_001", "doc_id": "DOC_POLICY_001", "page": 1, "chunk": 0},
+            section_path=(),
+            labels=("policy",),
+            vector_score=0.91,
+            rerank_score=None,
+            metadata_index=0,
+            extra={},
+        )
+        server, thread = self._with_server(_build_context(local_hits=[hit], allow_unscoped_default=True))
+        try:
+            status, body = self._request(
+                server=server,
+                method="POST",
+                path="/v1/chat/completions",
+                payload={
+                    "model": "cost",
+                    "messages": [{"role": "user", "content": "規程の要点は？"}],
+                    "allow_unscoped": True,
+                    "stream": False,
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("object"), "chat.completion")
+            self.assertEqual(body.get("model"), "cost")
+            self.assertEqual(body.get("choices", [])[0].get("message", {}).get("content"), "stub-answer")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_openai_chat_completions_bad_request_without_messages(self) -> None:
+        server, thread = self._with_server(_build_context())
+        try:
+            status, body = self._request(
+                server=server,
+                method="POST",
+                path="/v1/chat/completions",
+                payload={"model": "cost"},
+            )
+            self.assertEqual(status, 400)
+            self.assertIsInstance(body.get("error"), dict)
+            self.assertIn("messages", str(body.get("error", {}).get("message")))
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_dify_qa_success(self) -> None:
+        hit = RetrievalHit(
+            chunk_id="DOC_POLICY_001:p1:c0:o0:h001",
+            score=0.91,
+            text_snippet="規程の要点",
+            doc_meta={"doc": "DOC_POLICY_001", "doc_id": "DOC_POLICY_001", "page": 1, "chunk": 0},
+            section_path=(),
+            labels=("policy",),
+            vector_score=0.91,
+            rerank_score=None,
+            metadata_index=0,
+            extra={},
+        )
+        server, thread = self._with_server(_build_context(local_hits=[hit], allow_unscoped_default=True))
+        try:
+            status, body = self._request(
+                server=server,
+                method="POST",
+                path="/integrations/dify/qa",
+                payload={
+                    "query": "規程の要点は？",
+                    "answer_profile": "cost",
+                    "allow_unscoped": True,
+                },
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("status"), "success")
+            self.assertEqual(body.get("answer"), "stub-answer")
+            self.assertIsInstance(body.get("metadata"), dict)
+            self.assertIn("retrieval_stats", body["metadata"])
         finally:
             server.shutdown()
             thread.join(timeout=5)

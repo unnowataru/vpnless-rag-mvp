@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from core.app_config import DEFAULT_PROFILE
 from core.app_config import DEFAULT_REGION
@@ -72,6 +73,20 @@ class AppContext:
     vast_endpoint: str = ""
     external_endpoint: str = ""
     local_fallback_on_retriever_error: bool = True
+    cors_allow_origin: str = "*"
+
+
+@dataclass(frozen=True)
+class QaRequestOptions:
+    top_k: int
+    backend: str
+    explicit_filters: dict[str, Any]
+    rerank_enabled: bool
+    allow_unscoped: bool
+    auto_scope_max_docs: int
+    answer_profile: str
+    bedrock_model_override: str | None
+    request_id_seed: str | None
 
 
 def _json_error(message: str, *, status: int, details: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
@@ -128,6 +143,113 @@ def _bool_from_request(payload: dict[str, Any], key: str, default: bool) -> bool
         if text in {"0", "false", "no", "n"}:
             return False
     raise ValueError(f"{key} must be a boolean.")
+
+
+def _parse_qa_options(ctx: AppContext, payload: dict[str, Any]) -> QaRequestOptions:
+    top_k = _int_from_request(payload, "top_k", ctx.default_topk, minimum=1)
+    backend = _backend_from_request(payload)
+    filters_raw = payload.get("filters")
+    if filters_raw is None:
+        explicit_filters: dict[str, Any] = {}
+    else:
+        if not isinstance(filters_raw, dict):
+            raise ValueError("filters must be an object.")
+        explicit_filters = validate_filters(filters_raw)
+    rerank_enabled = _bool_from_request(payload, "rerank", ctx.default_rerank)
+    allow_unscoped = _bool_from_request(payload, "allow_unscoped", ctx.allow_unscoped_default)
+    auto_scope_max_docs = _int_from_request(payload, "auto_scope_max_docs", ctx.auto_scope_max_docs, minimum=1)
+    answer_profile = str(payload.get("answer_profile") or "").strip() or select_default_answer_profile(
+        ctx.runtime_config.answer_profiles
+    )
+    bedrock_model_override = str(payload.get("bedrock_model", "")).strip() or None
+    request_id_seed = str(payload.get("request_id", "")).strip() or None
+    return QaRequestOptions(
+        top_k=top_k,
+        backend=backend,
+        explicit_filters=explicit_filters,
+        rerank_enabled=rerank_enabled,
+        allow_unscoped=allow_unscoped,
+        auto_scope_max_docs=auto_scope_max_docs,
+        answer_profile=answer_profile,
+        bedrock_model_override=bedrock_model_override,
+        request_id_seed=request_id_seed,
+    )
+
+
+def _run_qa_request(
+    ctx: AppContext,
+    *,
+    question: str,
+    options: QaRequestOptions,
+):
+    def search_fn(query_text: str, top_k_inner: int, filters: dict[str, Any]):
+        return _search(
+            ctx,
+            query_text=query_text,
+            top_k=top_k_inner,
+            filters=filters,
+            backend=options.backend,
+        )
+
+    return run_qa_flow(
+        question=question,
+        request_id_seed=options.request_id_seed,
+        metadata=ctx.metadata,
+        temporal_rules=ctx.runtime_config.temporal_rules,
+        search_fn=search_fn,
+        top_k=options.top_k,
+        explicit_filters=options.explicit_filters,
+        runtime_default_filters=ctx.runtime_config.default_retrieval_filters,
+        auto_scope_max_docs=options.auto_scope_max_docs,
+        allow_unscoped=options.allow_unscoped,
+        rerank_enabled=options.rerank_enabled,
+        region=ctx.region,
+        profile=ctx.profile,
+        rerank_model=ctx.rerank_model,
+        rerank_topn=ctx.rerank_topn,
+        timeout_sec=ctx.aws_timeout_sec,
+        retries=ctx.aws_retries,
+        retry_backoff_sec=ctx.aws_retry_backoff_sec,
+        max_context_chars=ctx.max_context_chars,
+        max_tokens=ctx.max_tokens,
+        answer_profile=options.answer_profile,
+        bedrock_model_override=options.bedrock_model_override,
+        answer_profile_to_model=ctx.runtime_config.answer_profile_to_model,
+        system_prompt=ctx.system_prompt,
+    )
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and str(item.get("type", "")).strip() == "text":
+                text = str(item.get("text", "")).strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _question_from_openai_messages(messages: Any) -> str:
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("messages must be a non-empty array.")
+    for row in reversed(messages):
+        if not isinstance(row, dict):
+            continue
+        role = str(row.get("role", "")).strip().lower()
+        if role != "user":
+            continue
+        text = _content_to_text(row.get("content"))
+        if text:
+            return text
+    raise ValueError("messages must contain at least one user message with text content.")
+
+
+def _openai_error_body(message: str, *, err_type: str) -> dict[str, Any]:
+    return {"error": {"message": message, "type": err_type}}
 
 
 def _resolve_filters_and_scope(
@@ -238,12 +360,25 @@ class RagRequestHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", self.server.context.cors_allow_origin)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_openai_error(self, status: int, message: str, *, err_type: str) -> None:
+        self._send(status, _openai_error_body(message, err_type=err_type))
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Origin", self.server.context.cors_allow_origin)
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.end_headers()
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
+        path = urlparse(self.path).path
+        if path == "/health":
             ctx = self.server.context
             self._send(
                 HTTPStatus.OK,
@@ -261,20 +396,30 @@ class RagRequestHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/v1/models":
+            self._handle_openai_models()
+            return
         self._send(*_json_error("Not found.", status=HTTPStatus.NOT_FOUND))
 
     def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
         try:
             payload = _read_json_body(self)
         except ValueError as exc:
             self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
             return
 
-        if self.path == "/search":
+        if path == "/search":
             self._handle_search(payload)
             return
-        if self.path == "/qa":
+        if path == "/qa":
             self._handle_qa(payload)
+            return
+        if path == "/v1/chat/completions":
+            self._handle_openai_chat_completions(payload)
+            return
+        if path == "/integrations/dify/qa":
+            self._handle_dify_qa(payload)
             return
         self._send(*_json_error("Not found.", status=HTTPStatus.NOT_FOUND))
 
@@ -311,6 +456,150 @@ class RagRequestHandler(BaseHTTPRequestHandler):
         }
         self._send(HTTPStatus.OK, response)
 
+    def _handle_openai_models(self) -> None:
+        ctx = self.server.context
+        rows: list[dict[str, Any]] = []
+        for profile in ctx.runtime_config.answer_profiles:
+            key = str(getattr(profile, "key", "")).strip()
+            if not key:
+                continue
+            model_id = str(
+                getattr(profile, "model_id", "") or ctx.runtime_config.answer_profile_to_model.get(key, "")
+            ).strip()
+            description = str(getattr(profile, "description", "")).strip()
+            rows.append(
+                {
+                    "id": key,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "vpnless-rag",
+                    "metadata": {
+                        "bedrock_model_id": model_id,
+                        "description": description,
+                    },
+                }
+            )
+        self._send(HTTPStatus.OK, {"object": "list", "data": rows})
+
+    def _handle_openai_chat_completions(self, payload: dict[str, Any]) -> None:
+        ctx = self.server.context
+        try:
+            question = _question_from_openai_messages(payload.get("messages"))
+            model_selector = str(payload.get("model", "")).strip()
+            options_payload: dict[str, Any] = {}
+            for key in (
+                "top_k",
+                "filters",
+                "retriever_backend",
+                "rerank",
+                "allow_unscoped",
+                "auto_scope_max_docs",
+                "request_id",
+            ):
+                if key in payload:
+                    options_payload[key] = payload[key]
+            if model_selector:
+                if model_selector in ctx.runtime_config.answer_profile_to_model:
+                    options_payload["answer_profile"] = model_selector
+                else:
+                    options_payload["bedrock_model"] = model_selector
+            if "stream" in payload and bool(payload.get("stream")):
+                raise ValueError("stream=true is not supported. Use stream=false.")
+            options = _parse_qa_options(ctx, options_payload)
+            result = _run_qa_request(ctx, question=question, options=options)
+        except ValueError as exc:
+            self._send_openai_error(HTTPStatus.BAD_REQUEST, str(exc), err_type="invalid_request_error")
+            return
+        except SystemExit as exc:
+            self._send_openai_error(HTTPStatus.BAD_REQUEST, str(exc), err_type="invalid_request_error")
+            return
+        except RuntimeError as exc:
+            self._send_openai_error(HTTPStatus.BAD_GATEWAY, str(exc), err_type="api_error")
+            return
+
+        completion = {
+            "id": f"chatcmpl-{result.request_id[:24]}",
+            "object": "chat.completion",
+            "created": int(result.now_utc.timestamp()),
+            "model": options.answer_profile if options.bedrock_model_override is None else options.bedrock_model_override,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": result.answer},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+        self._send(HTTPStatus.OK, completion)
+
+    def _handle_dify_qa(self, payload: dict[str, Any]) -> None:
+        ctx = self.server.context
+        try:
+            inputs = payload.get("inputs")
+            inputs_dict = inputs if isinstance(inputs, dict) else {}
+            question = str(
+                payload.get("question")
+                or payload.get("query")
+                or inputs_dict.get("question")
+                or inputs_dict.get("query")
+                or ""
+            ).strip()
+            if not question:
+                raise ValueError("question (or query) is required.")
+            options_payload: dict[str, Any] = {}
+            for key in (
+                "top_k",
+                "filters",
+                "retriever_backend",
+                "rerank",
+                "allow_unscoped",
+                "auto_scope_max_docs",
+                "answer_profile",
+                "bedrock_model",
+                "request_id",
+            ):
+                if key in payload:
+                    options_payload[key] = payload[key]
+                elif key in inputs_dict:
+                    options_payload[key] = inputs_dict[key]
+            options = _parse_qa_options(ctx, options_payload)
+            result = _run_qa_request(ctx, question=question, options=options)
+        except ValueError as exc:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                {"code": "invalid_request", "message": str(exc)},
+            )
+            return
+        except SystemExit as exc:
+            self._send(
+                HTTPStatus.BAD_REQUEST,
+                {"code": "invalid_request", "message": str(exc)},
+            )
+            return
+        except RuntimeError as exc:
+            self._send(
+                HTTPStatus.BAD_GATEWAY,
+                {"code": "backend_error", "message": str(exc)},
+            )
+            return
+
+        self._send(
+            HTTPStatus.OK,
+            {
+                "status": result.status,
+                "request_id": result.request_id,
+                "answer": result.answer,
+                "outputs": {"answer": result.answer},
+                "metadata": {
+                    "model_id": result.model_id,
+                    "scope_source": result.scope_source,
+                    "filters": result.filters,
+                    "retrieval_stats": result.retrieval_stats,
+                },
+            },
+        )
+
     def _handle_qa(self, payload: dict[str, Any]) -> None:
         ctx = self.server.context
         question = str(payload.get("question") or payload.get("query_text") or "").strip()
@@ -319,67 +608,13 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            top_k = _int_from_request(payload, "top_k", ctx.default_topk, minimum=1)
-            backend = _backend_from_request(payload)
-            filters_raw = payload.get("filters")
-            if filters_raw is None:
-                explicit_filters: dict[str, Any] = {}
-            else:
-                if not isinstance(filters_raw, dict):
-                    raise ValueError("filters must be an object.")
-                explicit_filters = validate_filters(filters_raw)
-            rerank_enabled = _bool_from_request(payload, "rerank", ctx.default_rerank)
-            allow_unscoped = _bool_from_request(payload, "allow_unscoped", ctx.allow_unscoped_default)
-            auto_scope_max_docs = _int_from_request(
-                payload,
-                "auto_scope_max_docs",
-                ctx.auto_scope_max_docs,
-                minimum=1,
-            )
-            answer_profile = str(payload.get("answer_profile") or "").strip() or select_default_answer_profile(
-                ctx.runtime_config.answer_profiles
-            )
-            bedrock_model_override = str(payload.get("bedrock_model", "")).strip() or None
+            options = _parse_qa_options(ctx, payload)
         except ValueError as exc:
             self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
             return
 
-        def search_fn(query_text: str, top_k_inner: int, filters: dict[str, Any]):
-            return _search(
-                ctx,
-                query_text=query_text,
-                top_k=top_k_inner,
-                filters=filters,
-                backend=backend,
-            )
-
         try:
-            result = run_qa_flow(
-                question=question,
-                request_id_seed=str(payload.get("request_id", "")).strip() or None,
-                metadata=ctx.metadata,
-                temporal_rules=ctx.runtime_config.temporal_rules,
-                search_fn=search_fn,
-                top_k=top_k,
-                explicit_filters=explicit_filters,
-                runtime_default_filters=ctx.runtime_config.default_retrieval_filters,
-                auto_scope_max_docs=auto_scope_max_docs,
-                allow_unscoped=allow_unscoped,
-                rerank_enabled=rerank_enabled,
-                region=ctx.region,
-                profile=ctx.profile,
-                rerank_model=ctx.rerank_model,
-                rerank_topn=ctx.rerank_topn,
-                timeout_sec=ctx.aws_timeout_sec,
-                retries=ctx.aws_retries,
-                retry_backoff_sec=ctx.aws_retry_backoff_sec,
-                max_context_chars=ctx.max_context_chars,
-                max_tokens=ctx.max_tokens,
-                answer_profile=answer_profile,
-                bedrock_model_override=bedrock_model_override,
-                answer_profile_to_model=ctx.runtime_config.answer_profile_to_model,
-                system_prompt=ctx.system_prompt,
-            )
+            result = _run_qa_request(ctx, question=question, options=options)
         except ValueError as exc:
             self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
             return
@@ -396,7 +631,7 @@ class RagRequestHandler(BaseHTTPRequestHandler):
             "question": question,
             "answer": result.answer,
             "error": result.error,
-            "answer_profile": answer_profile,
+            "answer_profile": options.answer_profile,
             "model_id": result.model_id,
             "scope_source": result.scope_source,
             "filters": result.filters,
@@ -418,8 +653,8 @@ class RagRequestHandler(BaseHTTPRequestHandler):
                 "error": result.error,
                 "system_prompt_sha256": core_system_prompt_sha256(ctx.system_prompt),
                 "evidence_entries": result.evidence_entries,
-                "topk": top_k,
-                "rerank": rerank_enabled,
+                "topk": options.top_k,
+                "rerank": options.rerank_enabled,
                 "rerank_model": ctx.rerank_model,
                 "rerank_topn": ctx.rerank_topn,
                 "filters": result.filters,
@@ -461,6 +696,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aws-retry-backoff-sec", type=float, default=1.0)
     parser.add_argument("--allow-unscoped-default", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--auto-scope-max-docs", type=int, default=6)
+    parser.add_argument(
+        "--cors-allow-origin",
+        default="*",
+        help="CORS Access-Control-Allow-Origin value for API responses (PoC default: *).",
+    )
     parser.add_argument("--system-prompt-file", default=None)
     parser.add_argument("--audit-log-dir", default=None)
     return parser.parse_args()
@@ -551,6 +791,7 @@ def main() -> None:
         vast_endpoint=args.vast_endpoint,
         external_endpoint=args.external_endpoint,
         local_fallback_on_retriever_error=args.local_fallback_on_retriever_error,
+        cors_allow_origin=args.cors_allow_origin,
     )
 
     server_port = app_config.port if app_config.port is not None else args.port
