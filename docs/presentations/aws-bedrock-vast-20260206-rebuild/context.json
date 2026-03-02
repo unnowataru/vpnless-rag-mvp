@@ -1,0 +1,42 @@
+{
+  "theme": "aws-bedrock-vast-20260206-rebuild",
+  "source_ppt_path": "C:\\Users\\unnow\\OneDrive - 株式会社ネットワールド\\共有ドキュメント\\2025.12.26_AWS Bedrock & VAST DATA 検証\\AWS Bedrock & VAST DATA検証プラン_20260206.pptx",
+  "purpose": "26枚の検証プランを意思決定向けに圧縮再構成し、説明可能な実行計画として提示する",
+  "audience": "技術責任者・インフラアーキテクト・意思決定者",
+  "tone": "簡潔・実務的・検証可能",
+  "chapter_outline": [
+    "背景と目的",
+    "提案アーキテクチャ",
+    "検証計画",
+    "費用と実装状況",
+    "設計思想と次アクション"
+  ],
+  "story": {
+    "audience": "技術責任者・インフラアーキテクト・意思決定者",
+    "goal": "再構成された検証計画の共有と承認獲得",
+    "arc": "背景→提案→検証計画→結果→次アクション",
+    "duration_min": 15,
+    "language": "日本語",
+    "depth_split": "アーキテクチャ/検証計画70% + 設計思想/意思決定30%"
+  },
+  "key_metrics": [
+    {
+      "label": "元資料",
+      "value": "26 slides",
+      "note": "2026-02-06版"
+    },
+    {
+      "label": "再構成",
+      "value": "12 slides",
+      "note": "カバー含む"
+    }
+  ],
+  "constraints": [
+    "テンプレートは Networld-Basic.pptx を固定利用",
+    "重要用語は最小セットに圧縮",
+    "検証ステップは完了条件を明記",
+    "費用は上振れ前提で提示"
+  ],
+  "external_trends": [],
+  "evidence_images": []
+}

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Networld Slide Spec",
+  "type": "object",
+  "properties": {
+    "deck_title": { "type": "string" },
+    "deck_subtitle": { "type": "string" },
+    "slides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "layout": {
+            "type": "string",
+            "enum": ["section", "content", "content_alt"]
+          },
+          "title": { "type": "string" },
+          "bullets": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "body": { "type": "string" },
+          "notes": { "type": "string" },
+          "visual": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["none", "image_with_caption", "image_with_callouts"]
+              },
+              "image_path": { "type": "string" },
+              "caption": { "type": "string" },
+              "callouts": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["layout", "title"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["deck_title", "slides"],
+  "additionalProperties": false
+}

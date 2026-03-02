@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Codex Theme Context",
+  "type": "object",
+  "properties": {
+    "theme": { "type": "string" },
+    "purpose": { "type": "string" },
+    "audience": { "type": "string" },
+    "tone": { "type": "string" },
+    "chapter_outline": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "story": {
+      "type": "object",
+      "properties": {
+        "audience": { "type": "string" },
+        "goal": { "type": "string" },
+        "arc": { "type": "string" },
+        "duration_min": { "type": "integer", "minimum": 1 },
+        "language": { "type": "string" },
+        "depth_split": { "type": "string" }
+      },
+      "required": [
+        "audience",
+        "goal",
+        "arc",
+        "duration_min",
+        "language",
+        "depth_split"
+      ],
+      "additionalProperties": false
+    },
+    "key_metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": { "type": "string" },
+          "value": { "type": "string" },
+          "note": { "type": "string" }
+        },
+        "required": ["label", "value"],
+        "additionalProperties": false
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "external_trends": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rank": { "type": "integer", "minimum": 1 },
+          "name": { "type": "string" },
+          "summary": { "type": "string" },
+          "citation": { "type": "string" },
+          "bot_risk": { "type": "string", "enum": ["low", "medium", "high"] },
+          "confidence": { "type": "string", "enum": ["low", "medium", "high"] }
+        },
+        "required": ["rank", "name", "summary", "citation", "bot_risk", "confidence"],
+        "additionalProperties": false
+      }
+    },
+    "evidence_images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "caption": { "type": "string" },
+          "usage": { "type": "string" }
+        },
+        "required": ["path", "caption", "usage"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "theme",
+    "purpose",
+    "audience",
+    "chapter_outline",
+    "story",
+    "external_trends",
+    "evidence_images"
+  ],
+  "additionalProperties": false
+}
