@@ -1,0 +1,49 @@
+repository:
+  name: vpnless-rag-mvp
+  category: project_repo
+  inherits_from: work-env
+
+sources:
+  common_policy_repo: C:\dev\work-env
+
+agents:
+  codex:
+    role: implementation_orchestrator
+  claude:
+    role: design_reviewer_sidecar
+  xai:
+    role: research_sidecar
+
+shared_skills:
+  - name: x-search
+    source_repo: work-env
+    source_path: skills/x-search
+    use_cases:
+      - blog_source_collection
+      - slide_source_collection
+      - conference_reaction_scan
+
+project:
+  summary: On-prem PDF grounded RAG MVP with AWS Bedrock and local retrieval.
+  stack:
+    - python
+    - aws-bedrock
+    - terraform
+    - linux
+    - wsl
+  primary_commands:
+    bootstrap:
+      - python3 -m venv .venv
+      - source .venv/bin/activate
+      - pip install -r scripts/rag/requirements.txt
+    test:
+      - python3 -m pytest scripts/rag/tests -q
+    run:
+      - python3 scripts/rag/build_chunks_from_pdfs.py --pdf-dir rag_data/pdfs --out rag_data/index/chunks.jsonl
+      - python3 scripts/rag/build_vector_index.py --chunks rag_data/index/chunks.jsonl --index-dir rag_data/index
+      - python3 scripts/rag/rag_vector_cli.py --index-dir rag_data/index "質問文"
+
+governance:
+  common_policy_source: work-env
+  secrets_source: 1password_cli
+  deliverable_sot: onedrive_for_business
