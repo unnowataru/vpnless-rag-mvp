@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 import sys
 import threading
 import types
@@ -29,6 +30,9 @@ if "sentence_transformers" not in sys.modules:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.qa_flow as qa_flow
+from api_endpoints import BodyTooLargeError
+from api_endpoints import MAX_JSON_BODY_BYTES
+from api_endpoints import _read_json_body
 from core.retriever_contract import RetrievalHit
 import rag_api_server
 
@@ -385,6 +389,16 @@ class RagApiContractTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
+
+    def test_read_json_body_rejects_oversized_request_before_reading_body(self) -> None:
+        payload = b'{"query_text":"x"}'
+        handler = SimpleNamespace(
+            headers={"Content-Length": str(MAX_JSON_BODY_BYTES + 1)},
+            rfile=BytesIO(payload),
+        )
+
+        with self.assertRaisesRegex(BodyTooLargeError, str(MAX_JSON_BODY_BYTES)):
+            _read_json_body(handler)
 
 
 if __name__ == "__main__":

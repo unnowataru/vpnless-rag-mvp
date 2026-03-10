@@ -18,6 +18,8 @@ from core.retriever_fallback import FallbackRetriever
 from core.retrieval_stats import attach_backend_metadata
 from core.retrieval_stats import build_retrieval_stats
 
+MAX_JSON_BODY_BYTES = 1_048_576
+
 
 @dataclass(frozen=True)
 class AppContext:
@@ -74,6 +76,10 @@ def _json_error(message: str, *, status: int, details: dict[str, Any] | None = N
     return status, body
 
 
+class BodyTooLargeError(ValueError):
+    """Raised when request body exceeds the accepted size limit."""
+
+
 def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     raw_len = handler.headers.get("Content-Length")
     if raw_len is None:
@@ -82,6 +88,12 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
         length = int(raw_len)
     except ValueError as exc:
         raise ValueError("Invalid Content-Length header.") from exc
+    if length < 0:
+        raise ValueError("Invalid Content-Length header.")
+    if length > MAX_JSON_BODY_BYTES:
+        raise BodyTooLargeError(
+            f"JSON body must be <= {MAX_JSON_BODY_BYTES} bytes."
+        )
     payload = handler.rfile.read(length)
     try:
         loaded = json.loads(payload.decode("utf-8"))
