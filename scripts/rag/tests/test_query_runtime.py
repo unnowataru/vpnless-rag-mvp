@@ -64,7 +64,7 @@ class QueryRuntimeSecurityTests(unittest.TestCase):
         self.assertNotIn("foo.bar@example.com", prompt)
         self.assertNotIn("03-1234-5678", prompt)
 
-    def test_rerank_hits_sanitizes_question_and_sources_before_rerank(self) -> None:
+    def test_rerank_hits_sanitizes_question_and_metadata_before_rerank(self) -> None:
         hit = RetrievalHit(
             chunk_id="DOC_POLICY_001:p1:c0:o0:h001",
             score=0.91,
