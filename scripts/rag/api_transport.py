@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from api_endpoints import AppContext
+from api_endpoints import BodyTooLargeError
 from api_endpoints import _backend_from_request
 from api_endpoints import _backend_status
 from api_endpoints import _int_from_request
@@ -86,6 +87,9 @@ class RagRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = _read_json_body(self)
+        except BodyTooLargeError as exc:
+            self._send(*_json_error(str(exc), status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE))
+            return
         except ValueError as exc:
             self._send(*_json_error(str(exc), status=HTTPStatus.BAD_REQUEST))
             return

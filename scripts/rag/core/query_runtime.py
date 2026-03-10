@@ -381,6 +381,7 @@ def rerank_hits(
 
     model_arn = to_rerank_model_arn(rerank_model, region)
     number_of_results = len(hits) if rerank_topn <= 0 else min(rerank_topn, len(hits))
+    sanitized_question = sanitize(question).strip()
 
     sources: list[dict[str, Any]] = []
     for hit in hits:
@@ -403,7 +404,7 @@ def rerank_hits(
         )
 
     payload = {
-        "queries": [{"type": "TEXT", "textQuery": {"text": question}}],
+        "queries": [{"type": "TEXT", "textQuery": {"text": sanitized_question}}],
         "rerankingConfiguration": {
             "type": "BEDROCK_RERANKING_MODEL",
             "bedrockRerankingConfiguration": {
@@ -460,7 +461,8 @@ def call_bedrock(
     retries: int,
     retry_backoff_sec: float,
 ) -> str:
-    prompt = f"{system_prompt.rstrip()}\n\nQuestion:\n{question}\n\nEvidence:\n{evidence}"
+    sanitized_question = sanitize(question)
+    prompt = f"{system_prompt.rstrip()}\n\nQuestion:\n{sanitized_question}\n\nEvidence:\n{evidence}"
 
     payload = {
         "messages": [{"role": "user", "content": [{"text": prompt}]}],

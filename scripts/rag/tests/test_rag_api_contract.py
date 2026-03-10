@@ -29,6 +29,7 @@ if "sentence_transformers" not in sys.modules:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import core.qa_flow as qa_flow
+from api_endpoints import MAX_JSON_BODY_BYTES
 from core.retriever_contract import RetrievalHit
 import rag_api_server
 
@@ -381,6 +382,23 @@ class RagApiContractTests(unittest.TestCase):
             )
             self.assertEqual(status, 400)
             self.assertIn("Invalid JSON body", str(body.get("error")))
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+
+    def test_search_rejects_oversized_json_body(self) -> None:
+        server, thread = self._with_server(_build_context())
+        try:
+            raw = b'{"query_text":"' + (b"a" * MAX_JSON_BODY_BYTES) + b'"}'
+            status, body = self._request(
+                server=server,
+                method="POST",
+                path="/search",
+                raw=raw,
+            )
+            self.assertEqual(status, 413)
+            self.assertIn(str(MAX_JSON_BODY_BYTES), str(body.get("error")))
         finally:
             server.shutdown()
             thread.join(timeout=5)
